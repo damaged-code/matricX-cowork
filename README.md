@@ -2,9 +2,10 @@
 
 Windows C++ version of `mouse_wander.ps1`. Moves the mouse smoothly around the
 primary screen for 60 seconds and shows a smooth green edge glow
-throughout the animation. The glow has no grain, leaves the center clear,
+throughout the animation, plus a small "Press esc to quit" popup at the
+upper-left with 10px padding. The glow has no grain, leaves the center clear,
 and fades in and out. Escape restores manual movement immediately while
-the glow finishes its short fade-out.
+the overlay finishes its short fade-out.
 Manual mouse movement is blocked during the animation. Press Escape to stop
 early and restore manual movement. Mouse buttons, scrolling, and the keyboard
 remain available.

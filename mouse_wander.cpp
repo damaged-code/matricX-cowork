@@ -261,6 +261,45 @@ struct Borders {
                     (alpha << 24) | (red << 16) | (green << 8) | blue;
             }
         }
+        {
+            Gdiplus::Graphics graphics(dc);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+            graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+            graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+            constexpr Gdiplus::REAL left = 10.0f;
+            constexpr Gdiplus::REAL top = 10.0f;
+            constexpr Gdiplus::REAL popupWidth = 102.0f;
+            constexpr Gdiplus::REAL popupHeight = 22.0f;
+            constexpr Gdiplus::REAL radius = 2.0f;
+            const Gdiplus::RectF popup(left, top, popupWidth, popupHeight);
+
+            Gdiplus::GraphicsPath path;
+            path.AddArc(left, top, radius * 2.0f, radius * 2.0f, 180.0f, 90.0f);
+            path.AddArc(left + popupWidth - radius * 2.0f, top,
+                        radius * 2.0f, radius * 2.0f, 270.0f, 90.0f);
+            path.AddArc(left + popupWidth - radius * 2.0f, top + popupHeight - radius * 2.0f,
+                        radius * 2.0f, radius * 2.0f, 0.0f, 90.0f);
+            path.AddArc(left, top + popupHeight - radius * 2.0f,
+                        radius * 2.0f, radius * 2.0f, 90.0f, 90.0f);
+            path.CloseFigure();
+
+            Gdiplus::SolidBrush fill(Gdiplus::Color(255, 0, 0, 0));
+            Gdiplus::Pen outline(Gdiplus::Color(255, 0, 145, 2), 2.0f);
+            graphics.FillPath(&fill, &path);
+            graphics.DrawPath(&outline, &path);
+
+            Gdiplus::FontFamily family(L"Segoe UI");
+            Gdiplus::Font font(&family, 10.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
+            Gdiplus::StringFormat format;
+            format.SetAlignment(Gdiplus::StringAlignmentCenter);
+            format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            graphics.DrawString(L"Press esc to quit", -1, &font, popup, &format, &textBrush);
+            graphics.Flush(Gdiplus::FlushIntentionSync);
+        }
         POINT origin{};
         SIZE size{width, height};
         BLENDFUNCTION blend{AC_SRC_OVER, 0, 0, AC_SRC_ALPHA};
