@@ -1,4 +1,4 @@
-# Mouse Wander
+# matricX-cowork
 
 Windows C++ version of `mouse_wander.ps1`. Moves the mouse smoothly around the
 primary screen for 60 seconds and shows a smooth green edge glow
