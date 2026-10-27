@@ -77,3 +77,15 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build UI and Windows tool
         run: cmake --build build --parallel 2
+      - name: Validate Windows tool schemas
+        shell: pwsh
+        run: |
+          $json = & .\\tools\\matricX-cowork\\matricX-cowork.exe --describe | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Tool --describe failed" }
+          $tools = @($json | ConvertFrom-Json)
+          $names = @($tools | ForEach-Object { $_.name })
+          if ($names.Count -eq 0) { throw "Tool schema list is empty" }
+          if (($names | Select-Object -Unique).Count -ne $names.Count) { throw "Duplicate tool names found" }
+          foreach ($expected in @("fs_list", "fs_read", "fs_write", "fs_mkdir", "fs_delete")) {
+            if ($names -notcontains $expected) { throw "Missing filesystem tool: $expected" }
+          }
