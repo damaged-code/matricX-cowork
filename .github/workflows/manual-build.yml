@@ -107,7 +107,7 @@ jobs:
           $temp = Join-Path $env:TEMP "matricx-cowork-package-test"
           if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
           Expand-Archive -Path $zip -DestinationPath $temp
-          foreach ($required in @("m_cowork_ui.exe","Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Svg.dll","platforms\qwindows.dll","tools\matricX-cowork\matricX-cowork.exe","assets")) {
+          foreach ($required in @("m_cowork_ui.exe","Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Svg.dll","Qt6Network.dll","dll-dependencies.txt","platforms\qwindows.dll","tools\matricX-cowork\matricX-cowork.exe","assets")) {
             if (-not (Test-Path (Join-Path $temp $required))) { throw "ZIP missing $required" }
           }
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
