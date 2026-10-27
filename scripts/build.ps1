@@ -74,3 +74,87 @@ if (Test-Path $toolSrc) {
         Write-Host "built    $toolExe"
     }
 }
+
+
+# Deploy Qt and compiler runtimes beside the executable so the build folder is portable.
+$qtBin = 'C:\\msys64\\ucrt64\\bin'
+$deployCandidates = @(
+    (Join-Path $qtBin 'windeployqt6.exe'),
+    (Join-Path $qtBin 'windeployqt.exe')
+)
+$windeployqt = $deployCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $windeployqt) { throw "windeployqt6.exe was not found in $qtBin. Install the MSYS2 UCRT64 Qt6 base package." }
+
+Write-Host 'deploy   Qt runtime and plugins'
+& $windeployqt --release --compiler-runtime --no-translations --dir $build $exe
+if ($LASTEXITCODE -ne 0) { throw 'windeployqt failed to deploy Qt runtime files.' }
+
+# Copy the application assets and helper tool into the app-local layout expected by Assets.cpp.
+$assetsSrc = Join-Path $root 'assets'
+if (Test-Path $assetsSrc) {
+    Copy-Item $assetsSrc (Join-Path $build 'assets') -Recurse -Force
+} else {
+    Write-Warning "No assets directory found at $assetsSrc."
+}
+$packagedTool = Join-Path $build 'tools\\matricX-cowork'
+New-Item -ItemType Directory -Force $packagedTool | Out-Null
+if (Test-Path $toolExe) {
+    Copy-Item $toolExe (Join-Path $packagedTool 'matricX-cowork.exe') -Force
+} else {
+    throw "Required helper executable was not built: $toolExe"
+}
+
+# windeployqt handles Qt DLLs/plugins. Walk PE imports to copy any remaining non-system
+# MinGW/UCRT DLLs recursively, failing instead of silently producing an incomplete bundle.
+$objdump = Join-Path $qtBin 'objdump.exe'
+if (-not (Test-Path $objdump)) { throw "objdump.exe was not found in $qtBin." }
+$systemDlls = @(
+    'ADVAPI32.dll','BCRYPT.dll','BCRYPTPRIMITIVES.dll','COMDLG32.dll','CRYPT32.dll',
+    'DWMAPI.dll','GDI32.dll','IMM32.dll','KERNEL32.dll','MSVCP_WIN.dll','MSVCRT.dll',
+    'NCRYPT.dll','NORMALIZ.dll','NTDLL.dll','OLE32.dll','OLEAUT32.dll','RPCRT4.dll',
+    'SHELL32.dll','SHLWAPI.dll','USER32.dll','VERSION.dll','WINMM.dll','WS2_32.dll',
+    'WTSAPI32.dll','IPHLPAPI.dll','SETUPAPI.dll','DNSAPI.dll','UXTHEME.dll',
+    'WINHTTP.dll','WININET.dll','COMBASE.dll','PROPSYS.dll','UCRTBASE.dll'
+)
+$queue = [System.Collections.Generic.Queue[string]]::new()
+$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$queue.Enqueue($exe)
+Get-ChildItem $build -Recurse -File -Filter *.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
+while ($queue.Count -gt 0) {
+    $file = $queue.Dequeue()
+    if (-not $seen.Add([IO.Path]::GetFullPath($file))) { continue }
+    $imports = & $objdump -p $file 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "objdump could not inspect $file" }
+    foreach ($line in $imports) {
+        if ($line -match '^\\s*DLL Name:\\s*(.+?)\\s*$') {
+            $dll = $Matches[1]
+            if ($dll -match '^(?i:api-ms-win-|ext-ms-win-)') { continue }
+            $local = Join-Path $build $dll
+            if (Test-Path $local) { $queue.Enqueue($local); continue }
+            $candidate = Join-Path $qtBin $dll
+            if (Test-Path $candidate) {
+                Copy-Item $candidate $local -Force
+                $queue.Enqueue($local)
+                continue
+            }
+            if ($systemDlls -contains $dll) { continue }
+            # Windows system imports are sometimes forwarded through API-set names or shipped
+            # with Windows SDK/runtime; allow standard Windows DLLs not supplied by MinGW.
+            if ($dll -match '^(?i:api-ms-win-|ext-ms-win-)' -or $dll -match '^(?i:KERNELBASE|COMCTL32|SECUR32|SSPICLI|POWRPROF|CFGMGR32|DEVOBJ|WINTRUST|OLEACC|MPR|NETAPI32|USERENV|PSAPI|DBGHELP|CLB|MSIMG32|DINPUT8|DSOUND|AVRT|MFPLAT|MF|MFREADWRITE|WINSPOOL|WINSTA|WLDAP32|WEVTAPI|bcryptPrimitives|CRYPTBASE|PROFAPI|GPAPI|KtmW32|MSWSOCK|NSI|IPHLPAPI|WINMM|HID|Uxtheme)\\.dll$') { continue }
+            throw "Unresolved non-system DLL dependency '$dll' imported by '$file'. Add its runtime package or explicitly classify it as a Windows system DLL."
+        }
+    }
+}
+
+# Verify the essential deployment files are present.
+foreach ($required in @(
+    (Join-Path $build 'Qt6Core.dll'),
+    (Join-Path $build 'Qt6Gui.dll'),
+    (Join-Path $build 'Qt6Widgets.dll'),
+    (Join-Path $build 'Qt6Svg.dll'),
+    (Join-Path $build 'platforms\\qwindows.dll'),
+    (Join-Path $build 'tools\\matricX-cowork\\matricX-cowork.exe')
+)) {
+    if (-not (Test-Path $required)) { throw "Deployment is incomplete; required file missing: $required" }
+}
+Write-Host "packaged $build"
