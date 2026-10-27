@@ -919,7 +919,13 @@ void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int inde
         });
     };
 
-    if (SettingsManager::instance().requireConfirmation()) {
+    const QString policy = SettingsManager::instance().toolSafetyPolicy(tc.name);
+    const bool needsConfirmation =
+        policy == "ask" ||
+        (policy == "session" && !m_sessionApprovedTools.contains(tc.name)) ||
+        (policy == "inherit" && SettingsManager::instance().requireConfirmation());
+
+    if (needsConfirmation) {
         auto *confirmFrame = new QFrame(this);
         confirmFrame->setObjectName("confirmFrame");
         confirmFrame->setStyleSheet(
@@ -948,9 +954,10 @@ void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int inde
 
         m_msgLayout->insertWidget(m_msgLayout->count() - 1, confirmFrame);
 
-        connect(allowBtn, &QPushButton::clicked, this, [confirmFrame, proceed] {
+        connect(allowBtn, &QPushButton::clicked, this, [this, confirmFrame, proceed, tc, policy] {
             confirmFrame->hide();
             confirmFrame->deleteLater();
+            if (policy == "session") m_sessionApprovedTools.insert(tc.name);
             proceed();
         });
         connect(denyBtn, &QPushButton::clicked, this, [this, confirmFrame, tc, calls, index] {
