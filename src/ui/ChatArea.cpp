@@ -13,6 +13,7 @@
 #include <QPalette>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QVBoxLayout>
 
