@@ -162,11 +162,17 @@ foreach ($required in @(
     (Join-Path $build 'Qt6Gui.dll'),
     (Join-Path $build 'Qt6Widgets.dll'),
     (Join-Path $build 'Qt6Svg.dll'),
+    (Join-Path $build 'Qt6Network.dll'),
     (Join-Path $build 'platforms\qwindows.dll'),
     (Join-Path $build 'tools\matricX-cowork\matricX-cowork.exe')
 )) {
     if (-not (Test-Path $required)) { throw "Deployment is incomplete; required file missing: $required" }
 }
+# Record direct executable imports for troubleshooting; the recursive walk above also validates
+# the imports of bundled DLLs and plugins.
+$dependencyReport = Join-Path $build 'dll-dependencies.txt'
+& $objdump -p $exe | Select-String 'DLL Name:' | ForEach-Object { $_.Line.Trim() } | Set-Content $dependencyReport
+Write-Host "dependency report $dependencyReport"
 Write-Host "packaged $build"
 
 # Produce a ready-to-ship archive after a successful deployment.
