@@ -760,7 +760,7 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         std::error_code ec;
         const std::filesystem::path dir(rawPath);
         if (!std::filesystem::is_directory(dir, ec) || ec) return errReply(req, "path is not a readable directory");
-        std::string entries = "\\\"entries\\\":[";
+        std::string entries = "\"entries\":[";
         size_t count = 0;
         for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end && count < 200; it.increment(ec)) {
             if (count++) entries += ",";
@@ -768,8 +768,8 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
             const bool isDir = it->is_directory(ec);
             const auto size = isDir ? 0ull : it->file_size(ec);
             if (ec) { ec.clear(); }
-            entries += "{\\\"name\\\":\\\"" + jsonEscape(name) + "\\\",\\\"directory\\\":" + (isDir ? "true" : "false") +
-                       ",\\\"size\\\":" + std::to_string(size) + "}";
+            entries += "{\"name\":\"" + jsonEscape(name) + "\",\"directory\":" + (isDir ? "true" : "false") +
+                       ",\"size\":" + std::to_string(size) + "}";
         }
         if (ec) return errReply(req, "failed while listing directory");
         return okReply(req, entries + "]");
@@ -787,8 +787,8 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         if (!in) return errReply(req, "cannot open file for reading");
         std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         if (!in.eof() && in.fail()) return errReply(req, "failed while reading file");
-        return okReply(req, "\\\"path\\\":\\\"" + jsonEscape(file.u8string()) + "\\\",\\\"content\\\":\\\"" + jsonEscape(content) +
-                            "\\\",\\\"bytes\\\":" + std::to_string(content.size()));
+        return okReply(req, "\"path\":\"" + jsonEscape(file.u8string()) + "\",\"content\":\"" + jsonEscape(content) +
+                            "\",\"bytes\":" + std::to_string(content.size()));
     }
 
     if (cmd == "fs_write") {
@@ -809,7 +809,7 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         out.write(content.data(), static_cast<std::streamsize>(content.size()));
         out.close();
         if (!out) return errReply(req, "failed while writing file");
-        return okReply(req, "\\\"path\\\":\\\"" + jsonEscape(file.u8string()) + "\\\",\\\"bytes_written\\\":" + std::to_string(content.size()));
+        return okReply(req, "\"path\":\"" + jsonEscape(file.u8string()) + "\",\"bytes_written\":" + std::to_string(content.size()));
     }
 
     if (cmd == "fs_mkdir") {
@@ -818,7 +818,7 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         std::error_code ec;
         const bool created = std::filesystem::create_directories(std::filesystem::path(rawPath), ec);
         if (ec) return errReply(req, "cannot create directory: " + ec.message());
-        return okReply(req, "\\\"path\\\":\\\"" + jsonEscape(rawPath) + "\\\",\\\"created\\\":" + (created ? "true" : "false"));
+        return okReply(req, "\"path\":\"" + jsonEscape(rawPath) + "\",\"created\":" + (created ? "true" : "false"));
     }
 
     if (cmd == "fs_delete") {
@@ -832,7 +832,7 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         if (std::filesystem::is_directory(target, ec)) return errReply(req, "directory deletion is disabled; delete files individually");
         const bool removed = std::filesystem::remove(target, ec);
         if (ec || !removed) return errReply(req, "failed to delete file");
-        return okReply(req, "\\\"path\\\":\\\"" + jsonEscape(target.u8string()) + "\\\",\\\"deleted\\\":true");
+        return okReply(req, "\"path\":\"" + jsonEscape(target.u8string()) + "\",\"deleted\":true");
     }
 
     if (cmd == "screen_info") {
