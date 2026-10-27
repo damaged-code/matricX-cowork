@@ -60,7 +60,7 @@ commands = [
     {"id": 9, "cmd": "end_session"},
 ]
 for cmd in commands:
-    proc.stdin.write(json.dumps(cmd) + "\\n")
+    proc.stdin.write(json.dumps(cmd) + "\n")
     proc.stdin.flush()
     line = proc.stdout.readline()
     data = json.loads(line)
