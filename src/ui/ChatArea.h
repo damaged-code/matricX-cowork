@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QString>
+#include <QSet>
 #include <QTimer>
 #include <QWidget>
 
@@ -103,6 +104,7 @@ private:
     AudioRecorder m_audioRecorder;
     QList<ChatMessage> m_history;
     bool m_busy = false;
+    QSet<QString> m_sessionApprovedTools;
     int m_radius = theme::kWindowRadius;
 
     ActionStepCard *m_currentActionCard = nullptr;
