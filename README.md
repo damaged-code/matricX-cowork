@@ -56,6 +56,7 @@ The Linux smoke test runs under a virtual X server and does not replace testing 
 The computer-control engine communicates with the GUI via a JSON-lines protocol over standard I/O:
 - In the chat box, type `/tools` to display all available OS automation actions and schemas.
 - Run commands manually: `/tool mouse_move {"x":500,"y":300}`, `/tool screen_info`, or `/tool screenshot`.
+- Filesystem actions are available on both platforms: `/tool fs_list {"path":"."}`, `/tool fs_read {"path":"README.md"}`, `/tool fs_write {"path":"notes.txt","content":"hello"}`, `/tool fs_mkdir {"path":"scratch/new"}`, and `/tool fs_delete {"path":"notes.txt"}`. File reads and writes are capped at 1 MiB; directory listings return at most 200 entries; file overwrite requires `overwrite:true`; directory deletion is intentionally disabled.
 - The AI provider loop will leverage the same schema interface.
 
 ## Status
