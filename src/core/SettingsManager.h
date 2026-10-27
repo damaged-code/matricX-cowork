@@ -39,6 +39,10 @@ public:
     bool requireConfirmation() const;
     void setRequireConfirmation(bool req);
 
+    // Per-tool safety: inherit | ask | session | allow
+    QString toolSafetyPolicy(const QString &tool) const;
+    void setToolSafetyPolicy(const QString &tool, const QString &policy);
+
     // Title-bar chrome configuration
     QString windowControlsPlace() const;     // "titlebar" | "sidebar"
     void setWindowControlsPlace(const QString &place);
