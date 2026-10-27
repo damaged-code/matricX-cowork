@@ -44,6 +44,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 ./scripts/smoke-test.sh
 ```
 
+## Manual GitHub Actions workflow
+
+You can run a clean, remote build without pushing to `main`:
+
+1. Open **Actions → Manual build and smoke tests** in GitHub.
+2. Choose **Run workflow** and select the branch you want to validate (for this work, use `feature/agent-tools`).
+3. Choose **all**, **linux**, or **windows**. The Linux job can optionally run the JSON-lines smoke test under Xvfb.
+4. Start the workflow and inspect each job's logs for configure, build, or test failures.
+
+The workflow is triggered only by `workflow_dispatch`; it does not run on pushes or pull requests. It checks out the selected ref and builds on GitHub-hosted runners. The Linux smoke test is a protocol-level test under a virtual X server, not a substitute for testing real desktop interaction. Windows currently runs a build but has no automated tool-protocol smoke test.
+
 ## AI Tool (`matricX-cowork`)
 The computer-control engine communicates with the GUI via a JSON-lines protocol over standard I/O:
 - In the chat box, type `/tools` to display all available OS automation actions and schemas.
