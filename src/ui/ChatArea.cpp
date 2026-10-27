@@ -698,6 +698,7 @@ void ChatArea::send() {
                              "• /tools — List available computer control tools\n"
                              "• /tool <name> [json] — Execute an OS tool directly\n"
                              "• /tool end_session — End active tool control session\n"
+                             "• /tool-policy <name> <inherit|ask|session|allow> — Configure tool permissions\n"
                              "• /models — List available models for active provider\n"
                              "• /clear — Clear messages in current session\n"
                              "• /help — Show this help message";
@@ -723,6 +724,37 @@ void ChatArea::send() {
                 addMessage(QString("Failed to fetch models: %1").arg(err), false);
             }
         });
+        return;
+    }
+
+    if (t == "/tool-policy" || t.startsWith("/tool-policy ")) {
+        addMessage(t, true);
+        const parts = t.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 2 || parts.size() > 3) {
+            addMessage("Usage: /tool-policy <tool-name> <inherit|ask|session|allow>\nUse /tools to see tool names. 'inherit' follows the global confirmation setting; 'ask' prompts every time; 'session' asks once per app session; 'allow' permanently skips confirmation for that tool.", false);
+            return;
+        }
+        const QString toolName = parts[1];
+        bool knownTool = false;
+        for (const auto &value : m_tool.definitions()) {
+            if (value.toObject().value("name").toString() == toolName) { knownTool = true; break; }
+        }
+        if (!knownTool) {
+            addMessage(QString("Unknown tool '%1'. Use /tools to see available names.").arg(toolName), false);
+            return;
+        }
+        if (parts.size() == 2) {
+            addMessage(QString("Safety policy for %1: %2").arg(toolName, SettingsManager::instance().toolSafetyPolicy(toolName)), false);
+            return;
+        }
+        const QString policy = parts[2].toLower();
+        if (policy != "inherit" && policy != "ask" && policy != "session" && policy != "allow") {
+            addMessage("Invalid policy. Choose inherit, ask, session, or allow.", false);
+            return;
+        }
+        SettingsManager::instance().setToolSafetyPolicy(toolName, policy);
+        m_sessionApprovedTools.remove(toolName);
+        addMessage(QString("Safety policy for %1 set to %2.").arg(toolName, policy), false);
         return;
     }
 
