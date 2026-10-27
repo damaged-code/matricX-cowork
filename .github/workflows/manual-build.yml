@@ -80,7 +80,7 @@ jobs:
       - name: Validate Windows tool schemas
         shell: pwsh
         run: |
-          $json = & .\\tools\\matricX-cowork\\matricX-cowork.exe --describe | Out-String
+          $json = & .\tools\matricX-cowork\matricX-cowork.exe --describe | Out-String
           if ($LASTEXITCODE -ne 0) { throw "Tool --describe failed" }
           $tools = @($json | ConvertFrom-Json)
           $names = @($tools | ForEach-Object { $_.name })
