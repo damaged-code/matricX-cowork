@@ -37,7 +37,7 @@ EOF
 
 echo "Testing JSON command protocol..."
 python3 - << EOF
-import subprocess, json
+import subprocess, json, tempfile, os
 
 proc = subprocess.Popen(["${EXE}", "--idle-timeout", "10"],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -45,18 +45,35 @@ proc = subprocess.Popen(["${EXE}", "--idle-timeout", "10"],
 ready = proc.stdout.readline()
 assert "ready" in ready, f"Unexpected ready event: {ready}"
 
-for cmd in [{"id": 1, "cmd": "screen_info"},
-            {"id": 2, "cmd": "wait", "ms": 20},
-            {"id": 3, "cmd": "screenshot"},
-            {"id": 4, "cmd": "end_session"}]:
-    proc.stdin.write(json.dumps(cmd) + "\n")
+base = tempfile.mkdtemp(prefix="matricx-cowork-smoke-")
+subdir = os.path.join(base, "created")
+filepath = os.path.join(subdir, "sample.txt")
+commands = [
+    {"id": 1, "cmd": "screen_info"},
+    {"id": 2, "cmd": "wait", "ms": 20},
+    {"id": 3, "cmd": "fs_list", "path": base},
+    {"id": 4, "cmd": "fs_mkdir", "path": subdir},
+    {"id": 5, "cmd": "fs_write", "path": filepath, "content": "filesystem smoke test"},
+    {"id": 6, "cmd": "fs_read", "path": filepath},
+    {"id": 7, "cmd": "fs_delete", "path": filepath},
+    {"id": 8, "cmd": "screenshot"},
+    {"id": 9, "cmd": "end_session"},
+]
+for cmd in commands:
+    proc.stdin.write(json.dumps(cmd) + "\\n")
     proc.stdin.flush()
     line = proc.stdout.readline()
     data = json.loads(line)
     assert data.get("ok") is True, f"Command failed: {line}"
+    if cmd["cmd"] == "fs_read":
+        assert data.get("content") == "filesystem smoke test", f"Unexpected file content: {data}"
+    if cmd["cmd"] == "fs_list":
+        assert isinstance(data.get("entries"), list), f"Missing directory entries: {data}"
 
 stopped = proc.stdout.readline()
 assert "stopped" in stopped, f"Unexpected stopped event: {stopped}"
-proc.wait()
-print("All smoke tests passed successfully.")
+proc.wait(timeout=5)
+os.rmdir(subdir)
+os.rmdir(base)
+print("JSON-lines and filesystem smoke tests passed successfully.")
 EOF
