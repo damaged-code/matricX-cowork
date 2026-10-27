@@ -84,16 +84,17 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-qt6-svg
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-      - name: Build UI and Windows tool
+      - name: Build and deploy portable Windows package
         id: build
-        run: cmake --build build --parallel 2
-      - name: Validate Windows tool schemas
         shell: pwsh
         run: |
-          $json = & .\tools\matricX-cowork\matricX-cowork.exe --describe | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "Tool --describe failed" }
+          & .\scripts\build.ps1 -Clean
+          if ($LASTEXITCODE -ne 0) { throw "Windows build/deployment failed" }
+      - name: Validate package and helper tool
+        shell: pwsh
+        run: |
+          $json = & .\build\tools\matricX-cowork\matricX-cowork.exe --describe | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Packaged tool --describe failed" }
           $tools = @($json | ConvertFrom-Json)
           $names = @($tools | ForEach-Object { $_.name })
           if ($names.Count -eq 0) { throw "Tool schema list is empty" }
@@ -101,13 +102,27 @@ jobs:
           foreach ($expected in @("fs_list", "fs_read", "fs_write", "fs_mkdir", "fs_delete")) {
             if ($names -notcontains $expected) { throw "Missing filesystem tool: $expected" }
           }
-      - name: Upload Windows executables
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+          $zip = Join-Path $PWD "matricx-cowork-windows.zip"
+          if (-not (Test-Path $zip)) { throw "Portable ZIP was not produced" }
+          $temp = Join-Path $env:TEMP "matricx-cowork-package-test"
+          if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
+          Expand-Archive -Path $zip -DestinationPath $temp
+          foreach ($required in @("m_cowork_ui.exe","Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Svg.dll","platforms\qwindows.dll","tools\matricX-cowork\matricX-cowork.exe","assets")) {
+            if (-not (Test-Path (Join-Path $temp $required))) { throw "ZIP missing $required" }
+          }
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:QT_PLUGIN_PATH -ErrorAction SilentlyContinue
+          Remove-Item Env:QT_QPA_PLATFORM_PLUGIN_PATH -ErrorAction SilentlyContinue
+          $proc = Start-Process -FilePath (Join-Path $temp "m_cowork_ui.exe") -WorkingDirectory $temp -PassThru
+          Start-Sleep -Seconds 5
+          $proc.Refresh()
+          if ($proc.HasExited) { throw "Packaged GUI exited during clean-PATH startup test (exit code $($proc.ExitCode))" }
+          Stop-Process -Id $proc.Id -Force
+      - name: Upload portable Windows ZIP
+        if: \${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: matricx-cowork-windows
-          path: |
-            build/m_cowork_ui.exe
-            tools/matricX-cowork/matricX-cowork.exe
+          path: matricx-cowork-windows.zip
           if-no-files-found: error
           retention-days: 14
