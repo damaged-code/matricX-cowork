@@ -46,14 +46,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 
 ## Manual GitHub Actions workflow
 
-You can run a clean, remote build without pushing to `main`:
+The `.github/workflows/manual-build.yml` workflow builds Linux and Windows on GitHub-hosted runners and can run the Linux JSON-lines/filesystem smoke test under Xvfb. It is triggered only by `workflow_dispatch`; it does not run on pushes or pull requests. The Windows job validates the tool schemas after building.
 
-1. Open **Actions → Manual build and smoke tests** in GitHub.
-2. Choose **Run workflow** and select the branch you want to validate (for this work, use `feature/agent-tools`).
-3. Choose **all**, **linux**, or **windows**. The Linux job can optionally run the JSON-lines smoke test under Xvfb.
-4. Start the workflow and inspect each job's logs for configure, build, or test failures.
+**GitHub limitation:** GitHub's Actions UI only offers a `workflow_dispatch` workflow once that workflow file also exists on the repository's default branch. This branch contains the workflow, but it has intentionally not been merged or copied to the default branch. Keep development on `feature/agent-tools`; do not merge it merely to expose the manual trigger without explicit approval. Once the workflow is approved for the default branch, open **Actions → Manual build and smoke tests → Run workflow**, choose `feature/agent-tools`, and select `all`, `linux`, or `windows`.
 
-The workflow is triggered only by `workflow_dispatch`; it does not run on pushes or pull requests. It checks out the selected ref and builds on GitHub-hosted runners. The Linux smoke test is a protocol-level test under a virtual X server, not a substitute for testing real desktop interaction. Windows currently runs a build but has no automated tool-protocol smoke test.
+The Linux smoke test runs under a virtual X server and does not replace testing real desktop interaction. Windows currently validates a build and schemas but does not run a Windows protocol-level smoke test.
 
 ## AI Tool (`matricX-cowork`)
 The computer-control engine communicates with the GUI via a JSON-lines protocol over standard I/O:
