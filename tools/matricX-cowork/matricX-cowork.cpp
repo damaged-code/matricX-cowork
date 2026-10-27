@@ -26,6 +26,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <random>
 #include <string>
@@ -1106,6 +1109,88 @@ static int getPoint(const JObj& req, const char* kx, const char* ky, float& x, f
 static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSession) {
     std::string err;
 
+
+    if (cmd == "fs_list") {
+        std::string rawPath;
+        if (!getStr(req, "path", rawPath)) return errReply(req, "'path' (directory path) is required");
+        std::error_code ec;
+        const std::filesystem::path dir(rawPath);
+        if (!std::filesystem::is_directory(dir, ec) || ec) return errReply(req, "path is not a readable directory");
+        std::string entries = "\"entries\":[";
+        size_t count = 0;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end && count < 200; it.increment(ec)) {
+            if (count++) entries += ",";
+            const auto name = it->path().filename().u8string();
+            const bool isDir = it->is_directory(ec);
+            const auto size = isDir ? 0ull : it->file_size(ec);
+            if (ec) { ec.clear(); }
+            entries += "{\"name\":\"" + jsonEscape(name) + "\",\"directory\":" + (isDir ? "true" : "false") +
+                       ",\"size\":" + std::to_string(size) + "}";
+        }
+        if (ec) return errReply(req, "failed while listing directory");
+        return okReply(req, entries + "]");
+    }
+
+    if (cmd == "fs_read") {
+        std::string rawPath;
+        if (!getStr(req, "path", rawPath)) return errReply(req, "'path' (file path) is required");
+        std::error_code ec;
+        const std::filesystem::path file(rawPath);
+        if (!std::filesystem::is_regular_file(file, ec) || ec) return errReply(req, "path is not a readable regular file");
+        const auto size = std::filesystem::file_size(file, ec);
+        if (ec || size > 1048576) return errReply(req, "file exceeds the 1 MiB read limit or cannot be sized");
+        std::ifstream in(file, std::ios::binary);
+        if (!in) return errReply(req, "cannot open file for reading");
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (!in.eof() && in.fail()) return errReply(req, "failed while reading file");
+        return okReply(req, "\"path\":\"" + jsonEscape(file.u8string()) + "\",\"content\":\"" + jsonEscape(content) +
+                            "\",\"bytes\":" + std::to_string(content.size()));
+    }
+
+    if (cmd == "fs_write") {
+        std::string rawPath, content;
+        if (!getStr(req, "path", rawPath) || !getStr(req, "content", content))
+            return errReply(req, "'path' and 'content' (strings) are required");
+        if (content.size() > 1048576) return errReply(req, "content exceeds the 1 MiB write limit");
+        const auto itOverwrite = req.find("overwrite");
+        const bool overwrite = itOverwrite != req.end() && itOverwrite->second.t == JVal::Bool && itOverwrite->second.b;
+        const std::filesystem::path file(rawPath);
+        std::error_code ec;
+        if (std::filesystem::exists(file, ec) && !overwrite) return errReply(req, "file already exists; set overwrite=true to replace it");
+        if (ec) return errReply(req, "cannot inspect target path");
+        if (!file.parent_path().empty() && !std::filesystem::is_directory(file.parent_path(), ec))
+            return errReply(req, "parent directory does not exist");
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        if (!out) return errReply(req, "cannot open file for writing");
+        out.write(content.data(), static_cast<std::streamsize>(content.size()));
+        out.close();
+        if (!out) return errReply(req, "failed while writing file");
+        return okReply(req, "\"path\":\"" + jsonEscape(file.u8string()) + "\",\"bytes_written\":" + std::to_string(content.size()));
+    }
+
+    if (cmd == "fs_mkdir") {
+        std::string rawPath;
+        if (!getStr(req, "path", rawPath)) return errReply(req, "'path' (directory path) is required");
+        std::error_code ec;
+        const bool created = std::filesystem::create_directories(std::filesystem::path(rawPath), ec);
+        if (ec) return errReply(req, "cannot create directory: " + ec.message());
+        return okReply(req, "\"path\":\"" + jsonEscape(rawPath) + "\",\"created\":" + (created ? "true" : "false"));
+    }
+
+    if (cmd == "fs_delete") {
+        std::string rawPath;
+        if (!getStr(req, "path", rawPath)) return errReply(req, "'path' is required");
+        const std::filesystem::path target(rawPath);
+        if (target.empty() || target == target.root_path() || target == target.root_path().root_path())
+            return errReply(req, "refusing to delete an empty or root path");
+        std::error_code ec;
+        if (!std::filesystem::exists(target, ec) || ec) return errReply(req, "target does not exist");
+        if (std::filesystem::is_directory(target, ec)) return errReply(req, "directory deletion is disabled; delete files individually");
+        const bool removed = std::filesystem::remove(target, ec);
+        if (ec || !removed) return errReply(req, "failed to delete file");
+        return okReply(req, "\"path\":\"" + jsonEscape(target.u8string()) + "\",\"deleted\":true");
+    }
+
     if (cmd == "screen_info") {
         POINT p;
         GetCursorPos(&p);
@@ -1307,6 +1392,11 @@ static const char* TOOL_DEFINITIONS = R"JSON([
   {"name":"keyboard_type","description":"Type text into the focused window like a person typing. Newlines press Enter and tabs press Tab.","input_schema":{"type":"object","properties":{"text":{"type":"string"},"delay_ms":{"type":"integer","description":"Average delay between characters, 0-500. Default 12"}},"required":["text"]}},
   {"name":"keyboard_key","description":"Press a key or shortcut such as \"enter\", \"ctrl+c\" or \"alt+tab\". Several shortcuts can be given separated by spaces, e.g. \"ctrl+a ctrl+c\". Names: ctrl, shift, alt, win, enter, tab, esc, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f24, plus single characters (a, 5, ...; use \"plus\" for the + key).","input_schema":{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}},
   {"name":"wait","description":"Pause for a number of milliseconds (max 60000), e.g. to let a page or app finish loading.","input_schema":{"type":"object","properties":{"ms":{"type":"integer"}},"required":["ms"]}},
+  {"name":"fs_list","description":"List up to 200 entries in a directory. Returns names, directory flags, and file sizes.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Directory path to list"}},"required":["path"]}},
+  {"name":"fs_read","description":"Read a UTF-8/text file up to 1 MiB. Returns its content and byte count.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"File path to read"}},"required":["path"]}},
+  {"name":"fs_write","description":"Create a text file up to 1 MiB. Existing files are preserved unless overwrite=true is explicitly supplied.","input_schema":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"overwrite":{"type":"boolean","description":"Must be true to replace an existing file"}},"required":["path","content"]}},
+  {"name":"fs_mkdir","description":"Create a directory and any missing parent directories.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Directory path to create"}},"required":["path"]}},
+  {"name":"fs_delete","description":"Delete one file. Directory deletion and root-path deletion are refused.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"File path to delete"}},"required":["path"]}},
   {"name":"end_session","description":"Finish: remove the overlay, restore the normal cursor and give mouse control back to the user. Call this when the task is done.","input_schema":{"type":"object","properties":{},"required":[]}}
 ])JSON";
 
