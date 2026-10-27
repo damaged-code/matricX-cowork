@@ -172,5 +172,8 @@ Write-Host "packaged $build"
 # Produce a ready-to-ship archive after a successful deployment.
 $zip = Join-Path $root 'matricx-cowork-windows.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $build '*') -DestinationPath $zip -CompressionLevel Optimal
+$packageItems = Get-ChildItem $build -Force | Where-Object { $_.Name -ne 'obj' }
+Compress-Archive -Path $packageItems.FullName -DestinationPath $zip -CompressionLevel Optimal
+$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
 Write-Host "created  $zip"
+Write-Host "SHA256   $hash"
