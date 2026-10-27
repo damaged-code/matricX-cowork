@@ -51,10 +51,21 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build UI and Linux tool
+        id: build
         run: cmake --build build --parallel 2
       - name: Smoke test JSON-lines protocol
         if: inputs.run_smoke_tests
         run: xvfb-run -a ./scripts/smoke-test.sh
+      - name: Upload Linux executables
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: matricx-cowork-linux
+          path: |
+            build/m_cowork_ui
+            tools/matricX-cowork/matricX-cowork
+          if-no-files-found: error
+          retention-days: 14
 
   windows:
     name: Windows build
@@ -85,6 +96,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build UI and Windows tool
+        id: build
         run: cmake --build build --parallel 2
       - name: Validate Windows tool schemas
         shell: pwsh
@@ -98,3 +110,13 @@ jobs:
           foreach ($expected in @("fs_list", "fs_read", "fs_write", "fs_mkdir", "fs_delete")) {
             if ($names -notcontains $expected) { throw "Missing filesystem tool: $expected" }
           }
+      - name: Upload Windows executables
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: matricx-cowork-windows
+          path: |
+            build/m_cowork_ui.exe
+            tools/matricX-cowork/matricX-cowork.exe
+          if-no-files-found: error
+          retention-days: 14
