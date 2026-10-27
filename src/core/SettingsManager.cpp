@@ -149,6 +149,20 @@ void SettingsManager::setRequireConfirmation(bool req) {
     s.setValue("safety/requireConfirmation", req);
 }
 
+QString SettingsManager::toolSafetyPolicy(const QString &tool) const {
+    QSettings s("MCowork", "MCowork");
+    const QString policy = s.value("safety/toolPolicies/" + tool, "inherit").toString();
+    if (policy == "inherit" || policy == "ask" || policy == "session" || policy == "allow") return policy;
+    return "inherit";
+}
+
+void SettingsManager::setToolSafetyPolicy(const QString &tool, const QString &policy) {
+    if (tool.trimmed().isEmpty()) return;
+    if (policy != "inherit" && policy != "ask" && policy != "session" && policy != "allow") return;
+    QSettings s("MCowork", "MCowork");
+    s.setValue("safety/toolPolicies/" + tool, policy);
+}
+
 QString SettingsManager::windowControlsPlace() const {
     QSettings s("MCowork", "MCowork");
     return s.value("ui/windowControlsPlace", "titlebar").toString();
