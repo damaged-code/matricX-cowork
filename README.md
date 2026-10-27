@@ -57,6 +57,7 @@ The computer-control engine communicates with the GUI via a JSON-lines protocol 
 - In the chat box, type `/tools` to display all available OS automation actions and schemas.
 - Run commands manually: `/tool mouse_move {"x":500,"y":300}`, `/tool screen_info`, or `/tool screenshot`.
 - Filesystem actions are available on both platforms: `/tool fs_list {"path":"."}`, `/tool fs_read {"path":"README.md"}`, `/tool fs_write {"path":"notes.txt","content":"hello"}`, `/tool fs_mkdir {"path":"scratch/new"}`, and `/tool fs_delete {"path":"notes.txt"}`. File reads and writes are capped at 1 MiB; directory listings return at most 200 entries; file overwrite requires `overwrite:true`; directory deletion is intentionally disabled.
+- Configure per-tool safety with `/tool-policy <name> <inherit|ask|session|allow>`; for example, `/tool-policy fs_delete ask`. `inherit` follows the global confirmation setting, `ask` prompts every time, `session` prompts until approved once for the current app session, and `allow` persists permission for that tool. Use `/tool-policy <name>` to inspect a policy.
 - The AI provider loop will leverage the same schema interface.
 
 ## Status
