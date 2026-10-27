@@ -1,0 +1,79 @@
+name: Manual build and smoke tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which platform to build
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - linux
+          - windows
+      run_smoke_tests:
+        description: Run the Linux JSON-lines smoke test (requires Xvfb)
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Linux build${{ github.ref_name }}
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential cmake pkg-config ninja-build xvfb \
+            qt6-base-dev qt6-svg-dev qt6-multimedia-dev \
+            libx11-dev libxtst-dev libxfixes-dev libpng-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build UI and Linux tool
+        run: cmake --build build --parallel 2
+      - name: Smoke test JSON-lines protocol
+        if: inputs.run_smoke_tests
+        run: xvfb-run -a ./scripts/smoke-test.sh
+
+  windows:
+    name: Windows build
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-svg
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build UI and Windows tool
+        run: cmake --build build --parallel 2
