@@ -730,7 +730,7 @@ void ChatArea::send() {
 
     if (t == "/tool-policy" || t.startsWith("/tool-policy ")) {
         addMessage(t, true);
-        const parts = t.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const QStringList parts = t.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (parts.size() < 2 || parts.size() > 3) {
             addMessage("Usage: /tool-policy <tool-name> <inherit|ask|session|allow>\nUse /tools to see tool names. 'inherit' follows the global confirmation setting; 'ask' prompts every time; 'session' asks once per app session; 'allow' permanently skips confirmation for that tool.", false);
             return;
