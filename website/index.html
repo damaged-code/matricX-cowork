@@ -20,7 +20,9 @@
   <div class="logo"><span class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></span> M-Cowork</div>
   <div class="links">
     <a href="#demo">Demo</a>
+    <a href="#features">Features</a>
     <a href="#models">Models</a>
+    <a href="#tools">Tools</a>
     <a href="#build">Build</a>
     <a href="#status">Status</a>
   </div>
@@ -81,12 +83,82 @@
     </section>
   </div>
 
+  <section id="features" class="step wide">
+    <div class="copy wide">
+      <p class="num fade">FEATURES</p>
+      <h2 data-split>Everything in the box.</h2>
+      <p class="fade">A desktop agent, not a browser tab. The UI, the model and the automation engine are separate pieces that talk over a small, documented protocol.</p>
+      <div class="features fade">
+        <article class="feature">
+          <h3>Sees the screen</h3>
+          <p>Screenshots are fed back to the model as real images, so it reasons about what is actually on your desktop.</p>
+        </article>
+        <article class="feature">
+          <h3>Real mouse &amp; keyboard</h3>
+          <p>Smooth cursor movement, clicks, drags, scrolling, typed text and shortcuts — through Win32 or X11.</p>
+        </article>
+        <article class="feature">
+          <h3>Seven providers</h3>
+          <p>Gemini, OpenAI, Anthropic, DeepSeek, OpenRouter, Groq and local Ollama. Bring a key or run it offline.</p>
+        </article>
+        <article class="feature">
+          <h3>Human in the loop</h3>
+          <p>An optional Allow / Deny prompt before every OS action, plus Esc to abort a run at any moment.</p>
+        </article>
+        <article class="feature">
+          <h3>Local-first state</h3>
+          <p>Sessions, settings and keys live on this machine. Nothing is proxied through an M-Cowork server.</p>
+        </article>
+        <article class="feature">
+          <h3>Persistent sessions</h3>
+          <p>Search, rename, archive, restore and permanently delete chats. Each session keeps its own model.</p>
+        </article>
+        <article class="feature">
+          <h3>Voice input</h3>
+          <p>Record from the mic and transcribe with Whisper through Groq or OpenAI, then edit before sending.</p>
+        </article>
+        <article class="feature">
+          <h3>Readable output</h3>
+          <p>Markdown responses, reasoning cards, live tool status badges and one-click retry on errors.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <section id="models" class="step">
     <div class="copy">
       <p class="num fade">MODELS</p>
       <h2 data-split>Bring your own model.</h2>
       <p class="fade">Pick a provider in the settings panel, add your key, model and a custom base URL. Everything is stored locally.</p>
-      <div class="chips fade"><span>Gemini</span><span>OpenAI</span><span>Claude</span><span>Groq</span><span>Ollama</span></div>
+      <div class="chips fade"><span>Gemini</span><span>OpenAI</span><span>Claude</span><span>DeepSeek</span><span>OpenRouter</span><span>Groq</span><span>Ollama</span></div>
+    </div>
+  </section>
+
+  <section id="tools" class="step wide">
+    <div class="copy wide">
+      <p class="num fade">TOOLS</p>
+      <h2 data-split>Ten tools. One protocol.</h2>
+      <p class="fade">The engine exposes a small JSON-lines API over stdin/stdout. The model calls it the same way you can with <span class="mono">/tool</span> in the chat box.</p>
+      <table class="tools-table fade">
+        <thead>
+          <tr><th>Tool</th><th>What it does</th><th>Arguments</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>screen_info</td><td>Screen size and cursor position</td><td class="args">—</td></tr>
+          <tr><td>screenshot</td><td>Capture the desktop to PNG</td><td class="args">path?</td></tr>
+          <tr><td>mouse_move</td><td>Glide the cursor to a point</td><td class="args">x, y</td></tr>
+          <tr><td>mouse_click</td><td>Click, double or triple click</td><td class="args">x?, y?, button?, count?</td></tr>
+          <tr><td>mouse_drag</td><td>Press, move, release</td><td class="args">x, y, from_x?, from_y?</td></tr>
+          <tr><td>mouse_scroll</td><td>Scroll by wheel notches</td><td class="args">dy, dx?, x?, y?</td></tr>
+          <tr><td>keyboard_type</td><td>Type text like a person</td><td class="args">text, delay_ms?</td></tr>
+          <tr><td>keyboard_key</td><td>Press keys and shortcuts</td><td class="args">keys</td></tr>
+          <tr><td>wait</td><td>Pause for up to 60 seconds</td><td class="args">ms</td></tr>
+          <tr><td>end_session</td><td>Release control of the desktop</td><td class="args">—</td></tr>
+        </tbody>
+      </table>
+      <pre class="fade">{"id":1,"cmd":"mouse_move","x":1104,"y":412}
+{"id":1,"ok":true,"moved":true,"x":1104,"y":412}</pre>
+      <p class="fade small">Esc aborts a run. An idle timeout ends the session if anything hangs. Run <span class="mono">/tools</span> in the app to print the live schemas.</p>
     </div>
   </section>
 
@@ -104,23 +176,74 @@
     </div>
   </section>
 
+  <section id="faq" class="step wide">
+    <div class="copy wide">
+      <p class="num fade">FAQ</p>
+      <h2 data-split>Questions, answered.</h2>
+      <div class="faq-list fade">
+        <details class="faq" open>
+          <summary>Does it run shell commands or touch my files?</summary>
+          <p>No. On <span class="mono">main</span> the engine exposes only the ten GUI tools above. Filesystem, shell, SSH/SFTP and git tools are planned and will be opt-in and gated separately.</p>
+        </details>
+        <details class="faq">
+          <summary>Do I need an API key?</summary>
+          <p>For hosted providers, yes — add one per provider in Settings. Ollama runs locally and needs no key. Google Gemini can also sign in through Antigravity OAuth.</p>
+        </details>
+        <details class="faq">
+          <summary>Where is my data stored?</summary>
+          <p>Sessions and settings stay on this machine under the app data folder. Chat content is sent only to the provider you selected. Keys are stored locally.</p>
+        </details>
+        <details class="faq">
+          <summary>Can I stop it mid-task?</summary>
+          <p>Yes. Press Esc in the app, or hit the red Stop button, and the engine ends the session and returns cursor control to you.</p>
+        </details>
+        <details class="faq">
+          <summary>Which platforms are supported?</summary>
+          <p>Windows 10/11 and Linux (X11; Wayland with grim or ImageMagick import). macOS is not implemented yet.</p>
+        </details>
+        <details class="faq">
+          <summary>Is it open source?</summary>
+          <p>The source is on GitHub. Build it yourself with the steps above, or browse the code to see exactly what the agent can do.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
   <section id="status" class="step">
     <div class="copy card">
       <p class="num fade">STATUS</p>
       <h2 data-split>Where it stands.</h2>
       <ul class="check fade">
         <li class="done">Qt 6 UI, frameless window, native behavior</li>
-        <li class="done">Computer-control tool v0.4.0 + client wrapper</li>
-        <li class="done">AI provider settings panel</li>
-        <li>Agent loop with tool calls and screenshots</li>
-        <li>Chat history, streaming, markdown</li>
-        <li>Voice input and permission prompt</li>
-        <li>Installer / packaged release</li>
+        <li class="done">Computer-control engine v0.4.0 + JSON-lines client</li>
+        <li class="done">Seven providers, per-provider keys, model autodetect</li>
+        <li class="done">Agent loop with screenshots and vision feedback</li>
+        <li class="done">Multi-session history, search, archive and restore</li>
+        <li class="done">Markdown, reasoning cards and one-click retry</li>
+        <li class="done">Voice input through Whisper</li>
+        <li class="done">Optional Allow / Deny prompt before OS actions</li>
+        <li>Streaming responses</li>
+        <li>Secure key storage in the OS keychain</li>
+        <li>Remote SSH / SFTP, shell, filesystem and git tools</li>
+        <li>Context compaction for long conversations</li>
+        <li>Signed installer and GitHub release</li>
       </ul>
+      <div class="cta fade" style="margin-top:22px">
+        <a class="btn primary" href="https://github.com/damaged-code/matricX-cowork">View on GitHub</a>
+        <a class="btn" href="#build">Build from source</a>
+      </div>
+      <pre class="fade clone">git clone https://github.com/damaged-code/matricX-cowork.git</pre>
     </div>
   </section>
 
-  <footer>M-Cowork · built with Qt 6 · <span class="mono">matricX-cowork</span></footer>
+  <footer>
+    <span>M-Cowork · built with Qt 6 · <span class="mono">matricX-cowork v0.4.0</span></span>
+    <span class="foot-links">
+      <a href="https://github.com/damaged-code/matricX-cowork">GitHub</a>
+      <a href="#tools">Tools</a>
+      <a href="#faq">FAQ</a>
+    </span>
+  </footer>
 </main>
 
 <script type="module" src="main.js"></script>
