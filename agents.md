@@ -111,7 +111,7 @@ packages/msys2-packages.txt
 Screenshot results carry `imagePath`; `AiClient` base64-encodes the PNG and sends it as a
 vision part for Gemini, OpenAI-compatible, and Anthropic requests.
 
-The Stop button calls `m_tool.endSession()` and clears `m_busy` — see gaps in §12.
+The Stop button calls `m_tool.endSession()` and clears `m_busy` — see gaps in §11.
 
 ---
 
@@ -268,10 +268,10 @@ Ordered by impact. Each item names the place to start.
 5. **Response streaming.** `AiClient` waits for the full body; the UI only shows a
    generic thinking bubble. Add SSE/streaming for OpenAI-compatible, Gemini
    (`streamGenerateContent`), and Anthropic, with incremental markdown rendering.
-6. **Filesystem / shell tools.** `main` has none. The remote `feature/agent-tools` branch
-   and the old CI check (`fs_list`, `fs_read`, `fs_write`, `fs_mkdir`, `fs_delete`)
-   indicate planned filesystem tools. Add them behind an explicit sandbox (allowed roots),
-   size limits, and confirmation; keep shell execution opt-in and separately gated.
+6. **Filesystem / shell / remote tools.** `main` has none. The remote
+   `feature/agent-tools` branch and the old CI check (`fs_list`, `fs_read`, `fs_write`,
+   `fs_mkdir`, `fs_delete`) indicate planned filesystem tools. See §12 for the full
+   planned tool surface; every one of them needs a sandbox, limits, and confirmation.
 7. **Persist attachments.** `ChatMessageItem` drops `imagePath`, so screenshots vanish
    from history after restart. Store the path (and copy into app data) and restore the
    preview.
@@ -314,7 +314,63 @@ Ordered by impact. Each item names the place to start.
 
 ---
 
-## 12. Conventions for agents working here
+## 12. Planned tools (not implemented yet)
+
+The engine currently exposes **only the 10 GUI tools** from §5. The tools below are the
+intended expansion of `matricX-cowork --describe`; none exist on `main` today. Add them to
+the engine dispatch, the `--describe` schemas, and the CI validation list together.
+
+| Tool id | Capability | Risk | Required guardrails |
+|---|---|---|---|
+| `fs_list` | List a directory (name, size, mtime, type) | low | allowed roots, depth limit |
+| `fs_read` | Read a UTF-8/binary file | medium | allowed roots, max bytes, redact secrets |
+| `fs_write` | Create/overwrite a file | high | allowed roots, backup/atomic write, confirmation |
+| `fs_mkdir` | Create a directory | low | allowed roots |
+| `fs_delete` | Delete file/dir | high | allowed roots, no recursive by default, confirmation |
+| `fs_search` | Glob/regex search across files | medium | allowed roots, result cap, ignore list |
+| `shell_exec` | Run a command, return stdout/stderr/exit code | **critical** | explicit opt-in, argv (no shell string), cwd allowlist, timeout, output cap, confirmation |
+| `powershell` | Run a PowerShell script/command (Windows) | **critical** | opt-in, `-NoProfile -NonInteractive`, timeout, transcript log |
+| `bash` | Run a bash script/command (Linux) | **critical** | opt-in, timeout, no login shell, output cap |
+| `ssh_exec` | Run a command on a remote host over SSH | **critical** | host allowlist, key/agent auth, timeout, audit log |
+| `ssh_shell` | Persistent interactive SSH session (send/expect) | **critical** | host allowlist, idle timeout, session cap |
+| `sftp_list` | List a remote directory | medium | host allowlist, path jail |
+| `sftp_download` | Download a remote file | high | host allowlist, size cap, local path jail |
+| `sftp_upload` | Upload a local file | high | host allowlist, size cap, remote path jail |
+| `git_status` | Branch, staged/unstaged/untracked summary | low | repo path allowlist |
+| `git_diff` | Diff working tree / commit range | low | repo allowlist, size cap |
+| `git_log` | Recent commits with author/date | low | repo allowlist, count limit |
+| `git_branch` | List/create/switch/delete branches | high | repo allowlist, no force-delete without confirmation |
+| `git_commit` | Stage paths + commit with message | high | repo allowlist, show diff first, no `--force` |
+| `git_push` / `git_pull` | Sync with a remote | **critical** | repo allowlist, remote allowlist, never force-push, confirmation |
+| `git_clone` | Clone a repository | medium | URL scheme allowlist (`https`/`ssh`), destination jail, depth cap |
+| `http_request` | GET/POST an HTTP(S) URL, return status/headers/body | high | method allowlist, body/response caps, no credentials by default, domain allowlist |
+| `web_fetch` | Fetch a page and convert to markdown/text | medium | size cap, robots/timeout |
+| `clipboard_read` | Read clipboard text/image | medium | text only by default, no history |
+| `clipboard_write` | Write clipboard text | low | size cap |
+| `process_list` | List running processes (pid, name, cpu, mem) | low | — |
+| `process_kill` | Terminate a process by pid/name | **critical** | allowlist, never kill self/system pids, confirmation |
+| `package_run` | Invoke winget/apt/pacman/npm/pip | **critical** | command allowlist, dry-run first, confirmation |
+| `open_url` | Open a URL in the default browser | low | scheme allowlist (`http`/`https`) |
+| `notification` | Show a desktop notification | low | — |
+| `ocr_screen` | OCR a screen region and return text | medium | region bounds, no persistence |
+| `mcp_call` | Call a tool on a configured MCP server | varies | per-server allowlist, timeout, schema validation |
+
+Implementation notes:
+
+- Prefer **argv arrays** over shell strings to avoid quoting/injection bugs.
+- Every tool gets: timeout, output size cap, structured `{ok, error}` reply, and an audit
+  line (timestamp, tool, args hash, duration, exit status).
+- Group gating in settings: `tools.filesystem`, `tools.shell`, `tools.remote`,
+  `tools.git`, `tools.network`, `tools.process`. Default everything except read-only
+  filesystem/git inspection to **off**.
+- Remote tools should resolve credentials from the OS keychain/agent, never from
+  `provider_keys.json`.
+- The engine is a separate binary: adding a tool means rebuilding
+  `tools/matricX-cowork/` and restarting the app (`--describe` is cached per process).
+
+---
+
+## 13. Conventions for agents working here
 
 - Match the existing Qt/C++ style: `mcw::` namespace, header/source pairs, 4 spaces,
   forward declarations, `QString`/`QJsonObject` over STL strings.
