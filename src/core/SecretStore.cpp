@@ -158,12 +158,14 @@ struct SecretStore::Impl {
     Backend backend = Backend::FallbackFile;
     QHash<QString, QString> cache;
 
-    // dlopen state (Linux only)
+#ifndef Q_OS_WIN
+    // dlopen state (Linux only); the typedefs live in the #ifndef block above.
     void *lib = nullptr;
     SecretLookupSyncFn lookup = nullptr;
     SecretStoreSyncFn store = nullptr;
     SecretClearSyncFn clear = nullptr;
     SecretFreeFn freePassword = nullptr;
+#endif
 
     bool scanFile(QJsonObject *out) const {
         QFile f(secretsFilePath());
