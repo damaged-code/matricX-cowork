@@ -516,7 +516,10 @@ document.querySelectorAll('[data-split]').forEach(el => {
   const words = el.textContent.trim().split(/\s+/);
   el.innerHTML = words.map((w, i) => `<span class="w"><span style="transition-delay:${i * 70 + 80}ms">${w}</span></span>`).join(' ');
 });
-const io = new IntersectionObserver(es => es.forEach(e => e.target.closest('.step').classList.toggle('in', e.isIntersecting)), { threshold: .35 });
+// Reveal a section once its copy reaches the middle band of the viewport.
+// A fixed ratio threshold would never fire for blocks taller than the screen
+// (e.g. the stacked tool list on phones), so gate on intersection instead.
+const io = new IntersectionObserver(es => es.forEach(e => e.target.closest('.step').classList.toggle('in', e.isIntersecting)), { threshold: 0, rootMargin: '-10% 0px -10% 0px' });
 document.querySelectorAll('.step .copy').forEach(s => io.observe(s));
 
 /* ================= interaction + loop ================= */

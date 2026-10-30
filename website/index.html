@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>M-Cowork — Let your AI use your computer</title>
-<meta name="description" content="M-Cowork is a cross-platform desktop app that lets your AI see your screen and control your mouse and keyboard.">
+<meta name="description" content="M-Cowork is a cross-platform desktop app that lets your AI see your screen, control your mouse and keyboard, and read or edit files inside a sandbox.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -98,28 +98,44 @@
           <p>Smooth cursor movement, clicks, drags, scrolling, typed text and shortcuts — through Win32 or X11.</p>
         </article>
         <article class="feature">
+          <h3>Files, sandboxed</h3>
+          <p>List, read, write, create, delete and search files, jailed to your home folder, temp and any roots you allow.</p>
+        </article>
+        <article class="feature">
+          <h3>Shell when you ask</h3>
+          <p>An argv-only <span class="mono">shell_exec</span> stays hidden from the model until you turn it on in Settings.</p>
+        </article>
+        <article class="feature">
           <h3>Seven providers</h3>
           <p>Gemini, OpenAI, Anthropic, DeepSeek, OpenRouter, Groq and local Ollama. Bring a key or run it offline.</p>
         </article>
         <article class="feature">
+          <h3>Streaming replies</h3>
+          <p>Server-sent events render token by token, with automatic retry and backoff on transient failures.</p>
+        </article>
+        <article class="feature">
+          <h3>Long sessions survive</h3>
+          <p>Old turns are summarized by a compactor, so a chat keeps working past the provider's context limit.</p>
+        </article>
+        <article class="feature">
+          <h3>Keys in the OS keychain</h3>
+          <p>API keys are sealed with Windows DPAPI or the Linux keyring instead of sitting in plaintext.</p>
+        </article>
+        <article class="feature">
           <h3>Human in the loop</h3>
-          <p>An optional Allow / Deny prompt before every OS action, plus Esc to abort a run at any moment.</p>
+          <p>An Allow / Deny prompt before every OS action is on by default, and Esc aborts a run at any moment.</p>
         </article>
         <article class="feature">
-          <h3>Local-first state</h3>
-          <p>Sessions, settings and keys live on this machine. Nothing is proxied through an M-Cowork server.</p>
-        </article>
-        <article class="feature">
-          <h3>Persistent sessions</h3>
-          <p>Search, rename, archive, restore and permanently delete chats. Each session keeps its own model.</p>
+          <h3>Sessions that persist</h3>
+          <p>Search, rename, archive, restore and permanently delete chats. Tool results and screenshots reload after restart.</p>
         </article>
         <article class="feature">
           <h3>Voice input</h3>
           <p>Record from the mic and transcribe with Whisper through Groq or OpenAI, then edit before sending.</p>
         </article>
         <article class="feature">
-          <h3>Readable output</h3>
-          <p>Markdown responses, reasoning cards, live tool status badges and one-click retry on errors.</p>
+          <h3>Local-first state</h3>
+          <p>Sessions and settings stay on this machine. Nothing is proxied through an M-Cowork server.</p>
         </article>
       </div>
     </div>
@@ -137,13 +153,14 @@
   <section id="tools" class="step wide">
     <div class="copy wide">
       <p class="num fade">TOOLS</p>
-      <h2 data-split>Ten tools. One protocol.</h2>
+      <h2 data-split>Seventeen tools. One protocol.</h2>
       <p class="fade">The engine exposes a small JSON-lines API over stdin/stdout. The model calls it the same way you can with <span class="mono">/tool</span> in the chat box.</p>
       <table class="tools-table fade">
         <thead>
           <tr><th>Tool</th><th>What it does</th><th>Arguments</th></tr>
         </thead>
         <tbody>
+          <tr class="grp"><td colspan="3">Screen &amp; input</td></tr>
           <tr><td>screen_info</td><td>Screen size and cursor position</td><td class="args">—</td></tr>
           <tr><td>screenshot</td><td>Capture the desktop to PNG</td><td class="args">path?</td></tr>
           <tr><td>mouse_move</td><td>Glide the cursor to a point</td><td class="args">x, y</td></tr>
@@ -154,11 +171,20 @@
           <tr><td>keyboard_key</td><td>Press keys and shortcuts</td><td class="args">keys</td></tr>
           <tr><td>wait</td><td>Pause for up to 60 seconds</td><td class="args">ms</td></tr>
           <tr><td>end_session</td><td>Release control of the desktop</td><td class="args">—</td></tr>
+          <tr class="grp"><td colspan="3">Filesystem — jailed to allowed roots</td></tr>
+          <tr><td>fs_list</td><td>Entries with type, size and mtime</td><td class="args">path, max_entries?</td></tr>
+          <tr><td>fs_read</td><td>Read text, or bytes as base64</td><td class="args">path, max_bytes?</td></tr>
+          <tr><td>fs_write</td><td>Create or overwrite a file</td><td class="args">path, text?, base64?, overwrite?</td></tr>
+          <tr><td>fs_mkdir</td><td>Create a directory</td><td class="args">path</td></tr>
+          <tr><td>fs_delete</td><td>Delete a file or empty folder</td><td class="args">path, recursive?</td></tr>
+          <tr><td>fs_search</td><td>Wildcard filename search</td><td class="args">pattern, path?, max_results?</td></tr>
+          <tr class="grp"><td colspan="3">Shell — opt-in, argv only</td></tr>
+          <tr><td>shell_exec</td><td>Run a program, return stdout and stderr</td><td class="args">argv, cwd?, timeout_ms?, stdin?</td></tr>
         </tbody>
       </table>
-      <pre class="fade">{"id":1,"cmd":"mouse_move","x":1104,"y":412}
-{"id":1,"ok":true,"moved":true,"x":1104,"y":412}</pre>
-      <p class="fade small">Esc aborts a run. An idle timeout ends the session if anything hangs. Run <span class="mono">/tools</span> in the app to print the live schemas.</p>
+      <pre class="fade">{"id":1,"cmd":"fs_read","path":"notes/todo.md"}
+{"id":1,"ok":true,"path":"notes/todo.md","bytes":214,"content":"# Todo\n..."}</pre>
+      <p class="fade small"><span class="mono">fs_*</span> and <span class="mono">shell_exec</span> are limited to your home folder, the temp folder and any <span class="mono">--allow-root</span> paths. <span class="mono">shell_exec</span> only appears once you enable shell tools in Settings: it takes an argv array (never a shell string), caps output at 256 KiB and always has a hard timeout. Esc aborts a run; an idle timeout ends the session if anything hangs.</p>
     </div>
   </section>
 
@@ -183,7 +209,7 @@
       <div class="faq-list fade">
         <details class="faq" open>
           <summary>Does it run shell commands or touch my files?</summary>
-          <p>No. On <span class="mono">main</span> the engine exposes only the ten GUI tools above. Filesystem, shell, SSH/SFTP and git tools are planned and will be opt-in and gated separately.</p>
+          <p>Only inside a sandbox. <span class="mono">fs_*</span> tools are jailed to your home folder, the temp folder and any roots you pass with <span class="mono">--allow-root</span>. <span class="mono">shell_exec</span> stays hidden from the model until you enable shell tools in Settings, takes an argv array instead of a shell string, and is capped by a hard timeout and 256 KiB of output. The Allow / Deny prompt is on by default.</p>
         </details>
         <details class="faq">
           <summary>Do I need an API key?</summary>
@@ -191,7 +217,7 @@
         </details>
         <details class="faq">
           <summary>Where is my data stored?</summary>
-          <p>Sessions and settings stay on this machine under the app data folder. Chat content is sent only to the provider you selected. Keys are stored locally.</p>
+          <p>Sessions and settings stay on this machine under the app data folder. Chat content is sent only to the provider you selected. API keys are sealed with Windows DPAPI or the Linux keyring, not stored as plaintext.</p>
         </details>
         <details class="faq">
           <summary>Can I stop it mid-task?</summary>
@@ -200,6 +226,14 @@
         <details class="faq">
           <summary>Which platforms are supported?</summary>
           <p>Windows 10/11 and Linux (X11; Wayland with grim or ImageMagick import). macOS is not implemented yet.</p>
+        </details>
+        <details class="faq">
+          <summary>Where do screenshots go?</summary>
+          <p>They are written to a temp folder on this machine, shown in the chat, and sent to the model provider you picked as vision input so it can see the result of a click. They never pass through an M-Cowork server.</p>
+        </details>
+        <details class="faq">
+          <summary>Where can I download a build?</summary>
+          <p>Tagged releases attach portable zips for Windows and Linux. There is no signed installer yet, so unzip and run the executable, or build it yourself with the steps above.</p>
         </details>
         <details class="faq">
           <summary>Is it open source?</summary>
@@ -215,18 +249,21 @@
       <h2 data-split>Where it stands.</h2>
       <ul class="check fade">
         <li class="done">Qt 6 UI, frameless window, native behavior</li>
-        <li class="done">Computer-control engine v0.4.0 + JSON-lines client</li>
+        <li class="done">Engine v0.5.0: screen, mouse, keyboard, filesystem, shell</li>
+        <li class="done">Sandboxed <span class="mono">fs_*</span> tools and opt-in argv-only <span class="mono">shell_exec</span></li>
         <li class="done">Seven providers, per-provider keys, model autodetect</li>
+        <li class="done">Streaming replies with retry, backoff and a real Stop</li>
+        <li class="done">Context compaction for long conversations</li>
+        <li class="done">API keys sealed by DPAPI or the Linux keyring</li>
         <li class="done">Agent loop with screenshots and vision feedback</li>
-        <li class="done">Multi-session history, search, archive and restore</li>
-        <li class="done">Markdown, reasoning cards and one-click retry</li>
+        <li class="done">Sessions with archive, restore and persisted tool results</li>
         <li class="done">Voice input through Whisper</li>
-        <li class="done">Optional Allow / Deny prompt before OS actions</li>
-        <li>Streaming responses</li>
-        <li>Secure key storage in the OS keychain</li>
-        <li>Remote SSH / SFTP, shell, filesystem and git tools</li>
-        <li>Context compaction for long conversations</li>
-        <li>Signed installer and GitHub release</li>
+        <li class="done">Allow / Deny prompt on by default</li>
+        <li class="done">Tagged releases build portable zips for both platforms</li>
+        <li>Remote SSH / SFTP, git and MCP tools</li>
+        <li>Auto-titled sessions</li>
+        <li>Signed installer for Windows and Linux</li>
+        <li>macOS support</li>
       </ul>
       <div class="cta fade" style="margin-top:22px">
         <a class="btn primary" href="https://github.com/damaged-code/matricX-cowork">View on GitHub</a>
@@ -237,7 +274,7 @@
   </section>
 
   <footer>
-    <span>M-Cowork · built with Qt 6 · <span class="mono">matricX-cowork v0.4.0</span></span>
+    <span>M-Cowork · built with Qt 6 · <span class="mono">matricX-cowork v0.5.0</span></span>
     <span class="foot-links">
       <a href="https://github.com/damaged-code/matricX-cowork">GitHub</a>
       <a href="#tools">Tools</a>

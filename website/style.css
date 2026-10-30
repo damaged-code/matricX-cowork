@@ -23,6 +23,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;justify-content:s
 /* every section: text on the left, screen lives on the right */
 .step{height:100vh;display:flex;align-items:center;padding:0 5vw}
 .step#status,.step#models{height:auto;min-height:100vh}
+.step#status{align-items:flex-start;padding-top:14vh;padding-bottom:10vh}
 .step#build{height:240vh;align-items:flex-start}
 #build .copy{position:sticky;top:16vh}
 .copy{width:min(500px,42vw)}
@@ -88,6 +89,7 @@ footer{padding:60px 5vw 40px;color:#555566;font-size:13px;display:flex;justify-c
 .tools-table td{color:var(--muted)}
 .tools-table td:first-child{font-family:var(--mono);color:var(--y);white-space:nowrap}
 .tools-table tr:last-child td{border-bottom:0}
+.tools-table .grp td{font-family:var(--mono);font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#6c6c7c;background:rgba(255,255,255,.025);padding:12px 10px 6px;white-space:normal}
 .tools-table .args{font-family:var(--mono);font-size:11.5px;color:#9a9aa8}
 .small{font-size:12.5px!important;margin-top:10px}
 pre.clone{white-space:pre-wrap;word-break:break-word;font-size:12px}
@@ -115,13 +117,25 @@ pre.clone{white-space:pre-wrap;word-break:break-word;font-size:12px}
   .step.wide{align-items:flex-start;padding-top:8vh;padding-bottom:8vh}
   .copy.wide{width:100%}
   .features{grid-template-columns:1fr}
-  .tools-table{font-size:11.5px;table-layout:fixed}
-  .tools-table th:nth-child(1){width:31%}
-  .tools-table th:nth-child(2){width:44%}
-  .tools-table th:nth-child(3){width:25%}
+  .tools-table{font-size:11.5px}
   .tools-table th,.tools-table td{padding:7px 7px}
-  .tools-table td:first-child{white-space:normal}
   pre{font-size:10.5px;white-space:pre-wrap;word-break:break-word}
   .step#status{align-items:flex-start;padding-top:6vh;padding-bottom:6vh}
   footer{flex-direction:column;align-items:flex-start;gap:10px}
+}
+
+/* very narrow: stack every tool into its own card instead of squeezing columns */
+@media(max-width:560px){
+  .tools-table{display:block;background:none;border:0;overflow:visible}
+  .tools-table thead{display:none}
+  .tools-table tbody,.tools-table tr,.tools-table td{display:block;width:auto}
+  .tools-table tr{background:rgba(8,8,11,.72);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:8px}
+  .tools-table tr.grp{background:none;border:0;border-radius:0;padding:0;margin:16px 0 8px}
+  .tools-table tr.grp td{background:none;padding:0;font-size:9.5px;letter-spacing:1.3px;color:#6c6c7c}
+  .tools-table td{border:0;padding:0}
+  .tools-table tr:last-child{margin-bottom:0}
+  .tools-table td:first-child{font-size:12.5px;margin-bottom:3px}
+  .tools-table td:nth-child(2){font-size:12.5px}
+  .tools-table td.args{font-size:10.5px;color:#8a8a98;margin-top:6px}
+  .tools-table td.args::before{content:"args";display:block;font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:#5f5f6e;margin-bottom:1px}
 }
