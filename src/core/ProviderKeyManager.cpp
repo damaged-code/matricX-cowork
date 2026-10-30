@@ -8,6 +8,7 @@
 #include <QStandardPaths>
 #include <QUuid>
 
+#include "core/SecretStore.h"
 #include "core/SettingsManager.h"
 
 namespace mcw {
@@ -16,6 +17,13 @@ static QString storageFilePath() {
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(dir);
     return QDir(dir).filePath("provider_keys.json");
+}
+
+// Per-entry secrets live in the SecretStore ("pkmKey/<uuid>"); the JSON file
+// keeps only metadata (labels, active flag, ordering). Legacy versions of this
+// file stored the plaintext key in "key" — those migrate on first load.
+static QString secretKeyFor(const QString &entryId) {
+    return QString("pkmKey/%1").arg(entryId);
 }
 
 ProviderKeyManager::ProviderKeyManager() {
@@ -67,6 +75,9 @@ void ProviderKeyManager::addKey(const QString &providerId, const QString &key, c
     }
     list.append(entry);
 
+    // The secret itself is stored OS-protected immediately.
+    SecretStore::instance().store(secretKeyFor(entry.id), entry.key);
+
     // Sync active key to SettingsManager
     if (entry.isActive) {
         SettingsManager::instance().setApiKey(entry.key, providerId);
@@ -84,6 +95,7 @@ void ProviderKeyManager::removeKey(const QString &providerId, const QString &key
     for (int i = 0; i < list.size(); ++i) {
         if (list[i].id == keyId) {
             wasActive = list[i].isActive;
+            SecretStore::instance().remove(secretKeyFor(keyId));
             list.removeAt(i);
             break;
         }
@@ -131,6 +143,7 @@ void ProviderKeyManager::load() {
     const auto doc = QJsonDocument::fromJson(file.readAll());
     const auto root = doc.object();
 
+    bool migratedAny = false;
     for (auto it = root.begin(); it != root.end(); ++it) {
         const QString pId = it.key();
         const auto arr = it.value().toArray();
@@ -139,24 +152,38 @@ void ProviderKeyManager::load() {
             const auto obj = v.toObject();
             ApiKeyEntry e;
             e.id = obj.value("id").toString();
-            e.key = obj.value("key").toString();
             e.label = obj.value("label").toString();
             e.isActive = obj.value("isActive").toBool(false);
             e.createdAt = obj.value("createdAt").toVariant().toLongLong();
+
+            // Secret first from the OS-protected store; fall back to the
+            // legacy plaintext JSON field and migrate it in.
+            e.key = SecretStore::instance().load(secretKeyFor(e.id));
+            if (e.key.isEmpty()) {
+                const QString legacy = obj.value("key").toString();
+                if (!legacy.isEmpty()) {
+                    SecretStore::instance().store(secretKeyFor(e.id), legacy);
+                    e.key = legacy;
+                    migratedAny = true;
+                }
+            }
             if (!e.key.isEmpty()) list.append(e);
         }
         m_keys.insert(pId, list);
     }
+
+    // Rewrite metadata-only as soon as legacy plaintext has been moved out.
+    if (migratedAny) save();
 }
 
 void ProviderKeyManager::save() {
+    // Metadata only — secrets live in the SecretStore, never in this JSON.
     QJsonObject root;
     for (auto it = m_keys.begin(); it != m_keys.end(); ++it) {
         QJsonArray arr;
         for (const auto &k : it.value()) {
             QJsonObject obj;
             obj["id"] = k.id;
-            obj["key"] = k.key;
             obj["label"] = k.label;
             obj["isActive"] = k.isActive;
             obj["createdAt"] = k.createdAt;

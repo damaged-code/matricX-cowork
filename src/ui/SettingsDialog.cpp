@@ -290,8 +290,11 @@ void SettingsDialog::setupAppearanceTab(QWidget *tab) {
         "QCheckBox { color: #d1d5db; font-size: 13px; }"
         "QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #52525b; border-radius: 4px; background: #27272a; }"
         "QCheckBox::indicator:checked { background: #10b981; border-color: #10b981; }");
-    connect(confirmCheck, &QCheckBox::toggled, this, [](bool checked) {
+    connect(confirmCheck, &QCheckBox::toggled, this, [this](bool checked) {
         SettingsManager::instance().setRequireConfirmation(checked);
+        if (checked) {
+            m_statusLabel->setText("Permission prompts are on.");
+        }
     });
     layout->addWidget(confirmCheck);
 
@@ -299,6 +302,28 @@ void SettingsDialog::setupAppearanceTab(QWidget *tab) {
     safetyHint->setStyleSheet("color: #9ca3af; font-size: 12px;");
     safetyHint->setWordWrap(true);
     layout->addWidget(safetyHint);
+
+    auto *shellCheck = new QCheckBox("Allow shell command execution (shell_exec)");
+    shellCheck->setChecked(SettingsManager::instance().allowShell());
+    shellCheck->setCursor(Qt::PointingHandCursor);
+    shellCheck->setStyleSheet(
+        "QCheckBox { color: #d1d5db; font-size: 13px; }"
+        "QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #52525b; border-radius: 4px; background: #27272a; }"
+        "QCheckBox::indicator:checked { background: #10b981; border-color: #10b981; }");
+    connect(shellCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        SettingsManager::instance().setAllowShell(checked);
+        m_statusLabel->setText(checked ? "Shell tools enabled — applies to the next M-Cowork session."
+                                       : "Shell tools disabled.");
+    });
+    layout->addWidget(shellCheck);
+
+    auto *shellHint = new QLabel("Off by default. When enabled, the AI can run programs with an argv "
+                                 "command list (never a shell one-liner) inside your home folder and "
+                                 "other explicitly allowed roots, with output caps and a hard timeout. "
+                                "Takes effect the next time a computer-control session starts.");
+    shellHint->setStyleSheet("color: #9ca3af; font-size: 12px;");
+    shellHint->setWordWrap(true);
+    layout->addWidget(shellHint);
 
     layout->addStretch();
 

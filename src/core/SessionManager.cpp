@@ -194,18 +194,26 @@ void SessionManager::deleteSessionPermanently(const QString &sessionId) {
     emit sessionsChanged();
 }
 
-void SessionManager::appendMessage(const QString &sessionId, const QString &role, const QString &content) {
+void SessionManager::appendMessage(const QString &sessionId, const QString &role, const QString &content,
+                                   const QString &imagePath) {
     for (auto &s : m_sessions) {
         if (s.id == sessionId) {
             ChatMessageItem msg;
             msg.role = role;
             msg.content = content;
+            msg.imagePath = imagePath;
             msg.timestamp = QDateTime::currentSecsSinceEpoch();
             s.messages.append(msg);
             s.updatedAt = msg.timestamp;
 
-            // Auto-title from first user message if default title
-            if (s.messages.size() == 1 && (s.title == "New Session" || s.title == "Current Session") && role == "user") {
+            // Auto-title from the first real user message when the session
+            // still has a default title. Tool results and slash commands
+            // never make a title (they are plumbing, not the user's intent).
+            if ((s.title == "New Session" || s.title == "Current Session" || s.title == "New Chat") &&
+                role == "user" &&
+                !content.startsWith("Tool result") &&
+                !content.startsWith("Tool execution") &&
+                !content.startsWith("/")) {
                 QString t = content.trimmed();
                 if (t.length() > 30) t = t.left(27) + "...";
                 s.title = t;
@@ -251,6 +259,7 @@ void SessionManager::load() {
             ChatMessageItem m;
             m.role = mObj.value("role").toString();
             m.content = mObj.value("content").toString();
+            m.imagePath = mObj.value("imagePath").toString();
             m.timestamp = mObj.value("timestamp").toVariant().toLongLong();
             s.messages.append(m);
         }
@@ -276,6 +285,7 @@ void SessionManager::save() {
             mObj["role"] = m.role;
             mObj["content"] = m.content;
             mObj["timestamp"] = m.timestamp;
+            if (!m.imagePath.isEmpty()) mObj["imagePath"] = m.imagePath;
             msgs.append(mObj);
         }
         obj["messages"] = msgs;

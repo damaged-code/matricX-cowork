@@ -21,10 +21,14 @@ set(SRC_CORE
     src/core/Assets.h
     src/core/AudioRecorder.cpp
     src/core/AudioRecorder.h
+    src/core/ConversationCompactor.cpp
+    src/core/ConversationCompactor.h
     src/core/Icons.cpp
     src/core/Icons.h
     src/core/ProviderKeyManager.cpp
     src/core/ProviderKeyManager.h
+    src/core/SecretStore.cpp
+    src/core/SecretStore.h
     src/core/SessionManager.cpp
     src/core/SessionManager.h
     src/core/Theme.h
@@ -88,7 +92,7 @@ if(TARGET Qt6::Multimedia)
 endif()
 
 if(WIN32)
-    target_link_libraries(m_cowork_ui PRIVATE dwmapi)
+    target_link_libraries(m_cowork_ui PRIVATE dwmapi crypt32)
     set_target_properties(m_cowork_ui PROPERTIES WIN32_EXECUTABLE TRUE)
 
     # Windows tool binary

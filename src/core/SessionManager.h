@@ -9,8 +9,9 @@
 namespace mcw {
 
 struct ChatMessageItem {
-    QString role;      // "user" or "assistant"
+    QString role;      // "user", "assistant", "tool", or "thinking" (transcript-only)
     QString content;
+    QString imagePath; // optional attachment (tool screenshots)
     qint64 timestamp = 0;
 };
 
@@ -48,7 +49,8 @@ public:
     void deleteSessionPermanently(const QString &sessionId);
 
     // Messages
-    void appendMessage(const QString &sessionId, const QString &role, const QString &content);
+    void appendMessage(const QString &sessionId, const QString &role, const QString &content,
+                       const QString &imagePath = QString());
     QList<ChatMessageItem> getMessages(const QString &sessionId) const;
 
 signals:
