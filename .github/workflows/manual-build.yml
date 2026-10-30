@@ -7,7 +7,7 @@ on:
         description: Branch or tag to build
         type: string
         required: true
-        default: feature/agent-tools
+        default: main
       platform:
         description: Which platform to build
         type: choice
@@ -52,7 +52,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build UI and Linux tool
         id: build
-        run: cmake --build build --parallel 2
+        run: cmake --build build --parallel 4
       - name: Smoke test JSON-lines protocol
         if: inputs.run_smoke_tests
         run: xvfb-run -a ./scripts/smoke-test.sh
@@ -107,8 +107,19 @@ jobs:
           $names = @($tools | ForEach-Object { $_.name })
           if ($names.Count -eq 0) { throw "Tool schema list is empty" }
           if (($names | Select-Object -Unique).Count -ne $names.Count) { throw "Duplicate tool names found" }
-          foreach ($expected in @("fs_list", "fs_read", "fs_write", "fs_mkdir", "fs_delete")) {
-            if ($names -notcontains $expected) { throw "Missing filesystem tool: $expected" }
+          foreach ($expected in @(
+            "screen_info",
+            "screenshot",
+            "mouse_move",
+            "mouse_click",
+            "mouse_drag",
+            "mouse_scroll",
+            "keyboard_type",
+            "keyboard_key",
+            "wait",
+            "end_session"
+          )) {
+            if ($names -notcontains $expected) { throw "Missing computer-control tool: $expected" }
           }
       - name: Upload Windows executables
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

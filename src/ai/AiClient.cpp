@@ -6,6 +6,7 @@
 #include <QHttpPart>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -327,7 +328,17 @@ void AiClient::sendOpenAiCompatible(const QList<ChatMessage> &history,
             ToolCallRequest tcr;
             tcr.id = tc.value("id").toString();
             tcr.name = fn.value("name").toString();
-            const auto argsDoc = QJsonDocument::fromJson(fn.value("arguments").toString().toUtf8());
+            const QByteArray argsJson = fn.value("arguments").toString().toUtf8();
+            QJsonParseError argsError;
+            const QJsonDocument argsDoc = QJsonDocument::fromJson(argsJson, &argsError);
+            if (argsError.error != QJsonParseError::NoError || !argsDoc.isObject()) {
+                const QString detail = argsError.error != QJsonParseError::NoError
+                                           ? argsError.errorString()
+                                           : QString("expected a JSON object");
+                callback({false, QString(), {},
+                          QString("Invalid arguments for tool '%1': %2").arg(tcr.name, detail)});
+                return;
+            }
             tcr.arguments = argsDoc.object();
             resp.toolCalls.append(tcr);
         }
@@ -485,6 +496,7 @@ void AiClient::fetchAvailableModels(const QString &providerId, ModelsCallback ca
 
         const QString url = QString("%1/v1beta/models?key=%2").arg(baseUrl, token);
         QNetworkRequest req{QUrl(url)};
+        req.setTransferTimeout(120000);
         QNetworkReply *reply = m_nam->get(req);
         QObject::connect(reply, &QNetworkReply::finished, [reply, callback]() {
             reply->deleteLater();
@@ -511,6 +523,7 @@ void AiClient::fetchAvailableModels(const QString &providerId, ModelsCallback ca
             return;
         }
         QNetworkRequest req{QUrl(baseUrl + "/models")};
+        req.setTransferTimeout(120000);
         req.setRawHeader("x-api-key", apiKey.toUtf8());
         req.setRawHeader("anthropic-version", "2023-06-01");
         QNetworkReply *reply = m_nam->get(req);
@@ -538,6 +551,7 @@ void AiClient::fetchAvailableModels(const QString &providerId, ModelsCallback ca
     }
 
     QNetworkRequest req{QUrl(baseUrl + "/models")};
+    req.setTransferTimeout(120000);
     if (!apiKey.isEmpty()) {
         req.setRawHeader("Authorization", "Bearer " + apiKey.toUtf8());
     }
@@ -606,6 +620,7 @@ void AiClient::transcribeAudio(const QString &audioFilePath, TranscriptionCallba
     multiPart->append(filePart);
 
     QNetworkRequest request{QUrl(endpoint)};
+    request.setTransferTimeout(120000);
     request.setRawHeader("Authorization", "Bearer " + apiKey.toUtf8());
 
     QNetworkReply *reply = m_nam->post(request, multiPart);

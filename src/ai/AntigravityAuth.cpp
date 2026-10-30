@@ -4,6 +4,7 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -11,6 +12,7 @@
 #include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -52,6 +54,8 @@ static QString getGoogleClientSecret() {
 static const char *kAuthEndpoint = "https://accounts.google.com/o/oauth2/v2/auth";
 static const char *kTokenEndpoint = "https://oauth2.googleapis.com/token";
 static const char *kUserInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo";
+static constexpr int kMaxOAuthRequestSize = 16384;
+static constexpr int kAuthTimeoutMs = 180000;
 
 static const char *kScopes =
     "openid "
@@ -61,13 +65,60 @@ static const char *kScopes =
     "https://www.googleapis.com/auth/cclog "
     "https://www.googleapis.com/auth/experimentsandconfigs";
 
+static bool parseTokenResponse(QNetworkReply *reply,
+                               const QString &fallbackRefreshToken,
+                               GoogleTokenInfo &info,
+                               QString &error) {
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        error = "Invalid token response from Google.";
+        return false;
+    }
+
+    const QJsonObject obj = doc.object();
+    info.accessToken = obj.value("access_token").toString();
+    if (info.accessToken.isEmpty()) {
+        error = "Google's token response did not contain an access token.";
+        return false;
+    }
+
+    const int expiresIn = obj.value("expires_in").toInt(3600);
+    if (expiresIn <= 0) {
+        error = "Google's token response contained an invalid expiry time.";
+        return false;
+    }
+
+    info.refreshToken = obj.value("refresh_token").toString();
+    if (info.refreshToken.isEmpty()) {
+        info.refreshToken = fallbackRefreshToken;
+    }
+    info.expirySec = QDateTime::currentSecsSinceEpoch() + expiresIn;
+    info.valid = true;
+    return true;
+}
+
 AntigravityAuth::AntigravityAuth() {
     m_server = new QTcpServer(this);
     m_nam = new QNetworkAccessManager(this);
+    m_authTimer = new QTimer(this);
+    m_authTimer->setSingleShot(true);
+
     connect(m_server, &QTcpServer::newConnection, this, &AntigravityAuth::handleIncomingConnection);
+    connect(m_authTimer, &QTimer::timeout, this, [this]() {
+        if (!m_server->isListening()) return;
+
+        m_server->close();
+        m_expectedState.clear();
+        AuthCallback callback = std::move(m_pendingCallback);
+        if (callback) {
+            callback({false, "", "", "", 0, "Authentication timed out. Please try again."});
+        }
+    });
 }
 
 AntigravityAuth::~AntigravityAuth() {
+    m_authTimer->stop();
     if (m_server && m_server->isListening()) {
         m_server->close();
     }
@@ -119,17 +170,22 @@ void AntigravityAuth::clearToken() {
 }
 
 void AntigravityAuth::startAuthFlow(AuthCallback callback) {
-    m_pendingCallback = std::move(callback);
-
+    m_authTimer->stop();
     if (m_server->isListening()) {
         m_server->close();
     }
+    if (m_pendingCallback) {
+        AuthCallback previousCallback = std::move(m_pendingCallback);
+        previousCallback({false, "", "", "", 0, "Authentication was replaced by a new login attempt."});
+    }
+    m_pendingCallback = std::move(callback);
 
-    // Bind to loopback port
     if (!m_server->listen(QHostAddress::LocalHost, 0)) {
         if (!m_server->listen(QHostAddress::LocalHost, 8845)) {
-            if (m_pendingCallback) {
-                m_pendingCallback({false, "", "", "", 0, "Failed to start local OAuth loopback server."});
+            m_expectedState.clear();
+            AuthCallback failedCallback = std::move(m_pendingCallback);
+            if (failedCallback) {
+                failedCallback({false, "", "", "", 0, "Failed to start local OAuth loopback server."});
             }
             return;
         }
@@ -159,25 +215,54 @@ void AntigravityAuth::startAuthFlow(AuthCallback callback) {
     query.addQueryItem("prompt", "consent");
     authUrl.setQuery(query);
 
-    QDesktopServices::openUrl(authUrl);
+    if (!QDesktopServices::openUrl(authUrl)) {
+        m_server->close();
+        m_expectedState.clear();
+        AuthCallback failedCallback = std::move(m_pendingCallback);
+        if (failedCallback) {
+            failedCallback({false, "", "", "", 0, "Could not open the browser for authentication."});
+        }
+        return;
+    }
+
+    m_authTimer->start(kAuthTimeoutMs);
 }
 
 void AntigravityAuth::handleIncomingConnection() {
     QTcpSocket *socket = m_server->nextPendingConnection();
     if (!socket) return;
 
-    connect(socket, &QTcpSocket::readyRead, [this, socket]() {
-        const QByteArray reqData = socket->readAll();
-        const QString reqStr = QString::fromUtf8(reqData);
+    connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+    connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
+        if (socket->property("oauthRequestHandled").toBool()) return;
 
-        const int firstLineEnd = reqStr.indexOf("\r\n");
-        if (firstLineEnd == -1) return;
-        const QString firstLine = reqStr.left(firstLineEnd);
-        const QStringList parts = firstLine.split(' ');
-        if (parts.size() < 2) return;
+        QByteArray request = socket->property("oauthRequestBuffer").toByteArray();
+        request += socket->readAll();
+        if (request.size() > kMaxOAuthRequestSize) {
+            socket->setProperty("oauthRequestHandled", true);
+            sendHtmlResponse(socket, false, "Request was too large.");
+            return;
+        }
+        socket->setProperty("oauthRequestBuffer", request);
+
+        const int headerEnd = request.indexOf("\r\n\r\n");
+        if (headerEnd == -1) return;
+
+        socket->setProperty("oauthRequestHandled", true);
+        const int firstLineEnd = request.indexOf("\r\n");
+        if (firstLineEnd == -1) {
+            sendHtmlResponse(socket, false, "Malformed HTTP request.");
+            return;
+        }
+
+        const QStringList parts = QString::fromUtf8(request.left(firstLineEnd)).split(' ');
+        if (parts.size() != 3 || parts[0] != "GET" || !parts[2].startsWith("HTTP/1.")) {
+            sendHtmlResponse(socket, false, "Malformed HTTP request.");
+            return;
+        }
 
         const QUrl parsedUrl(parts[1]);
-        if (parsedUrl.path() != "/oauth-callback") {
+        if (!parsedUrl.isValid() || parsedUrl.path() != "/oauth-callback") {
             sendHtmlResponse(socket, false, "Invalid OAuth callback path.");
             return;
         }
@@ -187,24 +272,29 @@ void AntigravityAuth::handleIncomingConnection() {
         const QString code = q.queryItemValue("code");
         const QString err = q.queryItemValue("error");
 
+        if (state != m_expectedState) {
+            sendHtmlResponse(socket, false, "Security check failed (state mismatch).");
+            return;
+        }
+
         if (!err.isEmpty()) {
             sendHtmlResponse(socket, false, QString("Authentication cancelled or denied: %1").arg(err));
-            if (m_pendingCallback) {
-                m_pendingCallback({false, "", "", "", 0, QString("OAuth error: %1").arg(err)});
-            }
+            m_authTimer->stop();
             m_server->close();
+            m_expectedState.clear();
+            AuthCallback failedCallback = std::move(m_pendingCallback);
+            if (failedCallback) {
+                failedCallback({false, "", "", "", 0, QString("OAuth error: %1").arg(err)});
+            }
             return;
         }
 
-        if (state != m_expectedState || code.isEmpty()) {
-            sendHtmlResponse(socket, false, "Security check failed (state mismatch).");
-            if (m_pendingCallback) {
-                m_pendingCallback({false, "", "", "", 0, "OAuth state verification mismatch."});
-            }
-            m_server->close();
+        if (code.isEmpty()) {
+            sendHtmlResponse(socket, false, "OAuth callback did not contain an authorization code.");
             return;
         }
 
+        m_authTimer->stop();
         sendHtmlResponse(socket, true, "Google Antigravity authorization successful! You can now close this tab and return to M-Cowork.");
         m_server->close();
 
@@ -216,8 +306,9 @@ void AntigravityAuth::handleIncomingConnection() {
 void AntigravityAuth::sendHtmlResponse(QTcpSocket *socket, bool success, const QString &message) {
     const QString statusColor = success ? "#10b981" : "#ef4444";
     const QString title = success ? "Authorization Successful" : "Authorization Failed";
+    const QString safeMessage = message.toHtmlEscaped();
 
-    const QString body = QString(
+    const QByteArray body = QString(
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>%1</title>"
         "<style>"
         "body{background:#0d0d0d;color:#e5e5e5;font-family:'Segoe UI',sans-serif;display:flex;"
@@ -228,20 +319,22 @@ void AntigravityAuth::sendHtmlResponse(QTcpSocket *socket, bool success, const Q
         "p{color:#a3a3a3;font-size:15px;line-height:1.5;margin:0;}"
         "</style></head><body><div class='card'>"
         "<h1>%1</h1><p>%3</p></div></body></html>"
-    ).arg(title, statusColor, message);
+    ).arg(title, statusColor, safeMessage).toUtf8();
 
     const QByteArray response = QString("HTTP/1.1 200 OK\r\n"
                                         "Content-Type: text/html; charset=utf-8\r\n"
                                         "Content-Length: %1\r\n"
                                         "Connection: close\r\n\r\n")
-                                    .arg(body.toUtf8().length())
-                                    .toUtf8() + body.toUtf8();
+                                    .arg(body.size())
+                                    .toUtf8() + body;
     socket->write(response);
     socket->flush();
     socket->disconnectFromHost();
 }
 
 void AntigravityAuth::exchangeCodeForTokens(const QString &code, const QString &redirectUri) {
+    AuthCallback callback = std::move(m_pendingCallback);
+
     QUrlQuery postData;
     postData.addQueryItem("client_id", getGoogleClientId());
     postData.addQueryItem("client_secret", getGoogleClientSecret());
@@ -253,39 +346,34 @@ void AntigravityAuth::exchangeCodeForTokens(const QString &code, const QString &
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
 
     QNetworkReply *reply = m_nam->post(request, postData.toString(QUrl::FullyEncoded).toUtf8());
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() mutable {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            if (m_pendingCallback) {
-                m_pendingCallback({false, "", "", "", 0, reply->errorString()});
-            }
+            if (callback) callback({false, "", "", "", 0, reply->errorString()});
             return;
         }
 
-        const auto doc = QJsonDocument::fromJson(reply->readAll());
-        const auto obj = doc.object();
-
         GoogleTokenInfo info;
-        info.valid = true;
-        info.accessToken = obj.value("access_token").toString();
-        info.refreshToken = obj.value("refresh_token").toString();
-        const int expiresIn = obj.value("expires_in").toInt(3600);
-        info.expirySec = QDateTime::currentSecsSinceEpoch() + expiresIn;
+        QString error;
+        if (!parseTokenResponse(reply, QString(), info, error)) {
+            if (callback) callback({false, "", "", "", 0, error});
+            return;
+        }
 
-        // Fetch User Info (Email)
         QNetworkRequest userReq{QUrl(kUserInfoEndpoint)};
         userReq.setRawHeader("Authorization", "Bearer " + info.accessToken.toUtf8());
         QNetworkReply *userReply = m_nam->get(userReq);
-        connect(userReply, &QNetworkReply::finished, [this, userReply, info]() mutable {
+        connect(userReply, &QNetworkReply::finished, this, [this, userReply, info, callback]() mutable {
             userReply->deleteLater();
             if (userReply->error() == QNetworkReply::NoError) {
-                const auto userDoc = QJsonDocument::fromJson(userReply->readAll());
-                info.email = userDoc.object().value("email").toString();
+                QJsonParseError parseError;
+                const QJsonDocument userDoc = QJsonDocument::fromJson(userReply->readAll(), &parseError);
+                if (parseError.error == QJsonParseError::NoError && userDoc.isObject()) {
+                    info.email = userDoc.object().value("email").toString();
+                }
             }
             saveToken(info);
-            if (m_pendingCallback) {
-                m_pendingCallback(info);
-            }
+            if (callback) callback(info);
         });
     });
 }
@@ -306,24 +394,21 @@ void AntigravityAuth::refreshToken(const QString &refreshToken, AuthCallback cal
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
 
     QNetworkReply *reply = m_nam->post(request, postData.toString(QUrl::FullyEncoded).toUtf8());
-    connect(reply, &QNetworkReply::finished, [this, reply, callback, refreshToken]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, callback, refreshToken]() mutable {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             callback({false, "", "", "", 0, reply->errorString()});
             return;
         }
 
-        const auto doc = QJsonDocument::fromJson(reply->readAll());
-        const auto obj = doc.object();
-
         GoogleTokenInfo info;
-        info.valid = true;
-        info.accessToken = obj.value("access_token").toString();
-        info.refreshToken = obj.value("refresh_token").toString(refreshToken);
-        info.email = email();
-        const int expiresIn = obj.value("expires_in").toInt(3600);
-        info.expirySec = QDateTime::currentSecsSinceEpoch() + expiresIn;
+        QString error;
+        if (!parseTokenResponse(reply, refreshToken, info, error)) {
+            callback({false, "", "", "", 0, error});
+            return;
+        }
 
+        info.email = email();
         saveToken(info);
         callback(info);
     });

@@ -8,6 +8,7 @@
 class QTcpServer;
 class QTcpSocket;
 class QNetworkAccessManager;
+class QTimer;
 
 namespace mcw {
 
@@ -55,6 +56,7 @@ private:
 
     QTcpServer *m_server = nullptr;
     QNetworkAccessManager *m_nam = nullptr;
+    QTimer *m_authTimer = nullptr;
     AuthCallback m_pendingCallback;
     QString m_expectedState;
     quint16 m_port = 0;
