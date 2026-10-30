@@ -56,6 +56,25 @@ jobs:
       - name: Smoke test JSON-lines protocol
         if: inputs.run_smoke_tests
         run: xvfb-run -a ./scripts/smoke-test.sh
+      - name: Validate Linux tool schemas
+        run: |
+          tools/matricX-cowork/matricX-cowork --describe > /tmp/describe.json
+          python3 - <<'PYEOF'
+          import json
+          data = json.load(open('/tmp/describe.json'))
+          names = [t['name'] for t in data]
+          assert len(names) == 17, f"expected 17 tools, got {len(names)}"
+          assert sorted(names) == sorted(set(names)), "duplicate tool names"
+          expected = [
+              "screen_info", "screenshot", "mouse_move", "mouse_click", "mouse_drag",
+              "mouse_scroll", "keyboard_type", "keyboard_key", "wait",
+              "fs_list", "fs_read", "fs_write", "fs_mkdir", "fs_delete", "fs_search",
+              "shell_exec", "end_session",
+          ]
+          missing = [n for n in expected if n not in names]
+          assert not missing, f"missing tools: {missing}"
+          print("Linux tool schemas OK (17 tools)")
+          PYEOF
       - name: Upload Linux executables
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
@@ -117,6 +136,13 @@ jobs:
             "keyboard_type",
             "keyboard_key",
             "wait",
+            "fs_list",
+            "fs_read",
+            "fs_write",
+            "fs_mkdir",
+            "fs_delete",
+            "fs_search",
+            "shell_exec",
             "end_session"
           )) {
             if ($names -notcontains $expected) { throw "Missing computer-control tool: $expected" }

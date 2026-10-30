@@ -2,8 +2,10 @@
 
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QStringList>
 
 #include "core/Assets.h"
+#include "core/SettingsManager.h"
 
 namespace mcw {
 
@@ -42,7 +44,19 @@ QJsonArray CoworkTool::definitions() {
     if (!m_defs.isEmpty() || !available()) return m_defs;
     QProcess p;
     p.start(toolExecutablePath(), {"--describe"});
-    if (p.waitForFinished(5000)) m_defs = QJsonDocument::fromJson(p.readAllStandardOutput()).array();
+    if (p.waitForFinished(5000)) {
+        m_defs = QJsonDocument::fromJson(p.readAllStandardOutput()).array();
+        // shell_exec stays invisible until the user opted in via settings.
+        if (!SettingsManager::instance().allowShell()) {
+            QJsonArray filtered;
+            for (const auto &v : m_defs) {
+                if (v.toObject().value("name").toString() != "shell_exec") {
+                    filtered.append(v);
+                }
+            }
+            m_defs = filtered;
+        }
+    }
     return m_defs;
 }
 
@@ -63,8 +77,9 @@ bool CoworkTool::ensureStarted() {
         onOutput();
         failPending("tool session ended");
     });
-    m_proc->start(toolExecutablePath(),
-                  {"--glow", "green", "--speed", "normal", "--idle-timeout", "120"});
+    QStringList args = {"--glow", "green", "--speed", "normal", "--idle-timeout", "120"};
+    if (SettingsManager::instance().allowShell()) args << "--enable-shell";
+    m_proc->start(toolExecutablePath(), args);
     return m_proc->waitForStarted(3000);
 }
 

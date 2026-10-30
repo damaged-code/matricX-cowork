@@ -26,10 +26,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <random>
 #include <string>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 #ifdef _MSC_VER
 #pragma comment(lib, "user32.lib")
@@ -52,7 +56,7 @@
 // Constants & Version
 // ============================================================================
 
-static const char* VERSION_STRING = "matricX-cowork 0.4.0";
+static const char* VERSION_STRING = "matricX-cowork 0.5.0";
 static const UINT_PTR TIMER_ID = 1;
 static const int RENDER_INTERVAL_MS = 50;  // overlay refresh (~20 fps)
 static const UINT WM_APP_STOP = WM_APP + 1;
@@ -79,6 +83,8 @@ static GlowTheme g_glowTheme = GlowTheme::Green;
 static bool g_noCursor = false;
 static bool g_noLock = false;
 static int g_idleTimeoutSec = 120;  // 0 = never
+static bool g_shellEnabled = false;  // shell_exec requires an explicit opt-in
+static std::vector<std::string> g_allowRoots;  // extra roots for fs_* / shell_exec
 
 // Timing
 static LARGE_INTEGER g_startTime;
@@ -183,10 +189,11 @@ static std::string jsonEscape(const std::string& s) {
 // ============================================================================
 
 struct JVal {
-    enum T { Null, Bool, Num, Str } t = Null;
+    enum T { Null, Bool, Num, Str, Arr } t = Null;
     bool b = false;
     double n = 0;
     std::string s;
+    std::vector<JVal> arr;  // flat arrays only (strings/numbers/bools/null)
 };
 using JObj = std::map<std::string, JVal>;
 
@@ -278,7 +285,7 @@ private:
         }
         return false;
     }
-    bool parseValue(JVal& v) {
+    bool parseScalar(JVal& v) {
         if (m_i >= m_s.size()) return false;
         const char c = m_s[m_i];
         if (c == '"') {
@@ -298,6 +305,30 @@ private:
             return true;
         }
         return false;
+    }
+    bool parseValue(JVal& v) {
+        if (m_i >= m_s.size()) return false;
+        if (m_s[m_i] == '[') {
+            // Flat array: strings / numbers / bools / null. Nested objects and arrays
+            // are still unsupported (the computer-control protocol stays flat).
+            v.t = JVal::Arr;
+            m_i++;
+            skipWs();
+            if (eat(']')) return true;
+            for (;;) {
+                skipWs();
+                if (m_i < m_s.size() && (m_s[m_i] == '[' || m_s[m_i] == '{')) return false;
+                JVal el;
+                if (!parseScalar(el)) return false;
+                v.arr.push_back(el);
+                skipWs();
+                if (eat(',')) continue;
+                if (eat(']')) break;
+                return false;
+            }
+            return true;
+        }
+        return parseScalar(v);
     }
     bool hex4(uint32_t& v) {
         if (m_i + 4 > m_s.size()) return false;
@@ -368,6 +399,22 @@ static bool getStr(const JObj& o, const char* k, std::string& out) {
     if (it == o.end() || it->second.t != JVal::Str) return false;
     out = it->second.s;
     return true;
+}
+
+static bool getBool(const JObj& o, const char* k, bool def) {
+    auto it = o.find(k);
+    if (it == o.end() || it->second.t != JVal::Bool) return def;
+    return it->second.b;
+}
+
+static std::vector<std::string> getArgv(const JObj& o) {
+    std::vector<std::string> out;
+    auto it = o.find("argv");
+    if (it == o.end() || it->second.t != JVal::Arr) return out;
+    for (const auto& el : it->second.arr) {
+        if (el.t == JVal::Str) out.push_back(el.s);
+    }
+    return out;
 }
 
 static std::string idJson(const JObj& req) {
@@ -1080,6 +1127,684 @@ static void CALLBACK timerProc(HWND, UINT, UINT_PTR, DWORD) {
 }
 
 // ============================================================================
+// Filesystem & shell tool sandbox
+// ============================================================================
+
+static const size_t kFsMaxBytes = 1048576;      // hard cap for fs_read payloads
+static const size_t kShellMaxOutput = 262144;   // 256 KiB combined output cap
+static const size_t kWriteMaxBytes = 2097152;   // hard cap for fs_write payloads
+static const int kShellMaxArgs = 100;
+static const size_t kShellMaxArgBytes = 8192;
+static const char* kIgnoredDirs[] = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                                     "target", "dist", "Build", "Debug", "Release", ".cache"};
+
+static bool isIgnoredDirName(const std::string& name) {
+    for (const char* n : kIgnoredDirs) {
+        if (name == n) return true;
+    }
+    return false;
+}
+
+static void defaultRoots(std::vector<std::string>& out) {
+    char home[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableA("USERPROFILE", home, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        out.push_back(home);
+    }
+    wchar_t tmp[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tmp)) {
+        std::wstring dir(tmp);
+        while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+        out.push_back(wideToUtf8(dir));
+    }
+}
+
+static void allRoots(std::vector<std::string>& out) {
+    defaultRoots(out);
+    for (const std::string& r : g_allowRoots) out.push_back(r);
+}
+
+static fs::path toPath(const std::string& s) {
+    return fs::path(utf8ToWide(s));
+}
+
+static std::string pathToUtf8(const fs::path& p) {
+    return wideToUtf8(p.wstring());
+}
+
+// Resolves a client-supplied path and verifies it stays inside an allowed root.
+static bool ensureAllowed(const std::string& pathIn, fs::path& canonOut, std::string& err) {
+    if (pathIn.empty()) {
+        err = "'path' is required";
+        return false;
+    }
+    fs::path p = toPath(pathIn);
+    if (p.is_relative()) {
+        std::vector<std::string> roots;
+        defaultRoots(roots);
+        if (!roots.empty()) p = toPath(roots.front()) / p;
+    }
+    std::error_code ec;
+    fs::path canon = fs::weakly_canonical(p, ec);
+    if (ec) {
+        err = "cannot resolve path '" + pathIn + "': " + ec.message();
+        return false;
+    }
+    std::vector<std::string> roots;
+    allRoots(roots);
+    for (const std::string& rootStr : roots) {
+        std::error_code rec;
+        fs::path root = fs::weakly_canonical(toPath(rootStr), rec);
+        if (rec || root.empty()) continue;
+        const std::wstring cn = canon.wstring();
+        const std::wstring rn = root.wstring();
+        // Windows comparisons ignore case and accept either separator.
+        auto isPrefix = [](const std::wstring& full, const std::wstring& pre) {
+            if (pre.empty() || full.size() < pre.size()) return false;
+            for (size_t i = 0; i < pre.size(); ++i) {
+                wchar_t a = full[i] == L'/' ? L'\\' : full[i];
+                wchar_t b = pre[i] == L'/' ? L'\\' : pre[i];
+                if (towlower(a) != towlower(b)) return false;
+            }
+            return full.size() == pre.size();
+        };
+        auto isPrefixPlusSlash = [&](const std::wstring& full, const std::wstring& pre) {
+            if (pre.empty() || full.size() <= pre.size()) return false;
+            wchar_t sep = full[pre.size()] == L'/' ? L'\\' : full[pre.size()];
+            return sep == L'\\' && isPrefix(full.substr(0, pre.size()), pre);
+        };
+        if (isPrefix(cn, rn) || isPrefixPlusSlash(cn, rn)) {
+            canonOut = canon;
+            return true;
+        }
+    }
+    err = "path '" + pathIn + "' is outside the allowed roots (start matricX-cowork with --allow-root <path> to extend)";
+    return false;
+}
+
+static void appendJsonStr(std::string& out, const std::string& s) {
+    out += '"';
+    out += jsonEscape(s);
+    out += '"';
+}
+
+static uintmax_t entrySize(const fs::path& p, std::error_code& ec) {
+    return fs::file_size(p, ec);
+}
+
+static long long entryMtime(const fs::path& p) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa)) return 0;
+    const long long epochOffset = 116444736000000000LL;  // 1601 → 1970
+    long long ft = ((long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    return (ft - epochOffset) / 10000000LL;
+}
+
+static std::string listDirectoryReply(const JObj& req, const fs::path& dir, int maxEntries) {
+    struct Ent {
+        std::string name;
+        int type;  // 0 dir, 1 file, 2 symlink, 3 other
+        uintmax_t size = 0;
+        long long mtime = 0;
+    };
+    std::vector<Ent> entries;
+    std::error_code ec;
+    bool truncated = false;
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+         it != end && !ec; it.increment(ec)) {
+        Ent e;
+        e.name = pathToUtf8(it->path().filename());
+        std::error_code sec;
+        fs::file_status st = it->symlink_status(sec);
+        if (ec || sec) continue;
+        if (fs::is_symlink(st)) e.type = 2;
+        else if (fs::is_directory(st)) e.type = 0;
+        else if (fs::is_regular_file(st)) e.type = 1;
+        else e.type = 3;
+        if (e.type == 1) {
+            std::error_code fec;
+            uintmax_t sz = entrySize(it->path(), fec);
+            if (!fec) e.size = sz;
+        }
+        e.mtime = entryMtime(it->path());
+        entries.push_back(e);
+    }
+    if (entries.size() > (size_t)maxEntries) {
+        // C++17 lacks stable directory order; sort with lightweight case-insensitive compare.
+        std::sort(entries.begin(), entries.end(), [](const Ent& a, const Ent& b) {
+            if (a.type != b.type) {
+                if (a.type == 0) return true;
+                if (b.type == 0) return false;
+                return a.type < b.type;
+            }
+            return _wcsicmp(utf8ToWide(a.name).c_str(), utf8ToWide(b.name).c_str()) < 0;
+        });
+        entries.resize(maxEntries);
+        truncated = true;
+    }
+    std::string arr = "[";
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const Ent& e = entries[i];
+        if (i) arr += ",";
+        std::string typeStr = (e.type == 0) ? "dir" : (e.type == 1) ? "file" : (e.type == 2) ? "symlink" : "other";
+        arr += "{\"name\":";
+        appendJsonStr(arr, e.name);
+        arr += ",\"type\":\"" + typeStr + "\"";
+        if (e.type == 1) arr += ",\"size\":" + std::to_string(e.size);
+        arr += ",\"mtime\":" + std::to_string(e.mtime) + "}";
+    }
+    arr += "]";
+    return okReply(req, "\"entries\":" + arr + ",\"truncated\":" + (truncated ? "true" : "false"));
+}
+
+static bool readFileReply(const JObj& req, std::string& fields, std::string& err) {
+    std::string p;
+    if (!getStr(req, "path", p)) {
+        err = "'path' is required";
+        return false;
+    }
+    double maxB = 65536;
+    getNum(req, "max_bytes", maxB);
+    const size_t cap = (size_t)std::clamp(maxB, 1.0, (double)kFsMaxBytes);
+
+    fs::path canon;
+    if (!ensureAllowed(p, canon, err)) return false;
+
+    std::error_code ec;
+    if (!fs::is_regular_file(canon, ec)) {
+        err = "not a regular file: " + p;
+        return false;
+    }
+    uintmax_t fsize = fs::file_size(canon, ec);
+    if (ec) fsize = 0;
+
+    std::ifstream in(canon, std::ios::binary);
+    if (!in) {
+        err = "cannot open file: " + p;
+        return false;
+    }
+    std::vector<char> buf(cap);
+    in.read(buf.data(), (std::streamsize)cap);
+    const size_t got = (size_t)in.gcount();
+    buf.resize(got);
+    const bool truncated = (fsize > cap) || (got == cap && !in.eof());
+
+    bool binary = false;
+    for (char c : buf) {
+        if (c == '\0') { binary = true; break; }
+    }
+
+    fields = "\"path\":";
+    appendJsonStr(fields, pathToUtf8(canon));
+    fields += ",\"size\":" + std::to_string(fsize);
+    fields += ",\"truncated\":";
+    fields += truncated ? "true" : "false";
+    if (binary) {
+        static const char* kAlpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve(((got + 2) / 3) * 4);
+        for (size_t i = 0; i < got; i += 3) {
+            unsigned v = (unsigned char)buf[i] << 16;
+            if (i + 1 < got) v |= (unsigned char)buf[i + 1] << 8;
+            if (i + 2 < got) v |= (unsigned char)buf[i + 2];
+            out += kAlpha[(v >> 18) & 63];
+            out += kAlpha[(v >> 12) & 63];
+            out += (i + 1 < got) ? kAlpha[(v >> 6) & 63] : '=';
+            out += (i + 2 < got) ? kAlpha[v & 63] : '=';
+        }
+        fields += ",\"binary\":true,\"content_base64\":";
+        appendJsonStr(fields, out);
+    } else {
+        fields += ",\"content\":";
+        appendJsonStr(fields, std::string(buf.data(), buf.size()));
+    }
+    return true;
+}
+
+static bool writeFileReply(const JObj& req, std::string& fields, std::string& err) {
+    std::string p, text, b64;
+    if (!getStr(req, "path", p)) {
+        err = "'path' is required";
+        return false;
+    }
+    getStr(req, "text", text);
+    getStr(req, "base64", b64);
+    std::vector<unsigned char> data;
+    if (!b64.empty()) {
+        static const std::map<char, int> rev = [] {
+            std::map<char, int> m;
+            const char* alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            for (int i = 0; i < 64; i++) m[alpha[i]] = i;
+            return m;
+        }();
+        int acc = 0, bits = 0;
+        for (char c : b64) {
+            if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
+            auto it = rev.find(c);
+            if (it == rev.end()) {
+                err = "'base64' contains an invalid character";
+                return false;
+            }
+            acc = (acc << 6) | it->second;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                data.push_back((unsigned char)((acc >> bits) & 0xFF));
+            }
+        }
+    } else if (!text.empty() || req.find("text") != req.end()) {
+        data.assign(text.begin(), text.end());
+    }
+    if (data.empty() && text.empty() && b64.empty()) {
+        err = "either 'text' or 'base64' is required";
+        return false;
+    }
+    if (data.size() > kWriteMaxBytes) {
+        err = "write payload is too large (max " + std::to_string(kWriteMaxBytes) + " bytes)";
+        return false;
+    }
+
+    fs::path canon;
+    if (!ensureAllowed(p, canon, err)) return false;
+
+    const bool overwrite = getBool(req, "overwrite", true);
+    std::error_code ec;
+    if (fs::exists(canon, ec) && !overwrite) {
+        err = "file already exists; pass overwrite=true to replace it";
+        return false;
+    }
+    char tmpSuffix[32];
+    snprintf(tmpSuffix, sizeof tmpSuffix, ".mcow-tmp-%lu-%llu", GetCurrentProcessId(),
+             (unsigned long long)GetTickCount64());
+    const std::string tmp = pathToUtf8(canon) + tmpSuffix;
+    {
+        std::ofstream out(toPath(tmp), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            err = "cannot create file (check permissions)";
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(data.data()), (std::streamsize)data.size());
+        out.flush();
+        if (!out) {
+            out.close();
+            DeleteFileW(toPath(tmp).c_str());
+            err = "failed while writing file contents";
+            return false;
+        }
+    }
+    if (fs::exists(canon, ec)) DeleteFileW(canon.c_str());
+    fs::rename(toPath(tmp), canon, ec);
+    if (ec) {
+        std::error_code ec2;
+        fs::remove(toPath(tmp), ec2);
+        err = "cannot finalize the write: " + ec.message();
+        return false;
+    }
+    fields = "\"path\":";
+    appendJsonStr(fields, pathToUtf8(canon));
+    fields += ",\"bytes\":" + std::to_string(data.size());
+    return true;
+}
+
+static bool mkdirReply(const JObj& req, std::string& fields, std::string& err) {
+    std::string p;
+    if (!getStr(req, "path", p)) {
+        err = "'path' is required";
+        return false;
+    }
+    fs::path canon;
+    if (!ensureAllowed(p, canon, err)) return false;
+    std::error_code ec;
+    const bool existed = fs::exists(canon, ec);
+    if (existed && !fs::is_directory(canon, ec)) {
+        err = "a non-directory item already exists at that path";
+        return false;
+    }
+    if (!existed) {
+        fs::create_directories(canon, ec);
+        if (ec) {
+            err = "cannot create directory: " + ec.message();
+            return false;
+        }
+    }
+    fields = "\"path\":";
+    appendJsonStr(fields, pathToUtf8(canon));
+    fields += ",\"created\":";
+    fields += existed ? "false" : "true";
+    return true;
+}
+
+static bool deletePathReply(const JObj& req, std::string& fields, std::string& err) {
+    std::string p;
+    if (!getStr(req, "path", p)) {
+        err = "'path' is required";
+        return false;
+    }
+    const bool recursive = getBool(req, "recursive", false);
+
+    fs::path canon;
+    if (!ensureAllowed(p, canon, err)) return false;
+
+    // Never allow removing an allowed root itself.
+    std::vector<std::string> roots;
+    allRoots(roots);
+    for (const std::string& rootStr : roots) {
+        std::error_code rec;
+        fs::path root = fs::weakly_canonical(toPath(rootStr), rec);
+        if (!rec && _wcsicmp(canon.c_str(), root.c_str()) == 0) {
+            err = "refusing to delete an allowed root directory";
+            return false;
+        }
+    }
+
+    std::error_code ec;
+    fs::file_status st = fs::symlink_status(canon, ec);
+    if (ec) {
+        err = "cannot inspect path: " + ec.message();
+        return false;
+    }
+    bool didDelete = false;
+    if (fs::is_directory(st) && !fs::is_symlink(st)) {
+        if (!recursive) {
+            err = "refusing to delete a directory without recursive=true";
+            return false;
+        }
+        fs::remove_all(canon, ec);
+        if (ec) {
+            err = "cannot delete directory: " + ec.message();
+            return false;
+        }
+        didDelete = true;
+    } else if (!fs::exists(st) && !fs::is_symlink(st)) {
+        err = "path does not exist: " + p;
+        return false;
+    } else {
+        fs::remove(canon, ec);
+        if (ec) {
+            err = "cannot delete: " + ec.message();
+            return false;
+        }
+        didDelete = true;
+    }
+    fields = "\"deleted\":";
+    fields += didDelete ? "true" : "false";
+    return true;
+}
+
+// Iterative wildcard matching supporting * and ? (no escapes).
+static bool wildcardMatch(const std::string& sIn, const std::string& patIn, bool caseSensitive) {
+    std::string s = sIn, pat = patIn;
+    if (!caseSensitive) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
+        std::transform(pat.begin(), pat.end(), pat.begin(), [](unsigned char c) { return (char)tolower(c); });
+    }
+    size_t si = 0, pi = 0, star = std::string::npos, mark = 0;
+    while (si < s.size()) {
+        if (pi < pat.size() && (pat[pi] == '?' || pat[pi] == s[si])) {
+            si++;
+            pi++;
+        } else if (pi < pat.size() && pat[pi] == '*') {
+            star = pi++;
+            mark = si;
+        } else if (star != std::string::npos) {
+            pi = star + 1;
+            si = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pat.size() && pat[pi] == '*') pi++;
+    return pi == pat.size();
+}
+
+static bool searchReply(const JObj& req, std::string& fields, std::string& err) {
+    std::string base, patternIn;
+    double maxD = 100;
+    getNum(req, "max_results", maxD);
+    int maxResults = (int)std::clamp(maxD, 1.0, 200.0);
+    getStr(req, "path", base);
+    if (!getStr(req, "pattern", patternIn) || patternIn.empty()) {
+        err = "'pattern' is required (supports * and ?)";
+        return false;
+    }
+    fs::path canon;
+    std::error_code ec;
+    if (!base.empty()) {
+        if (!ensureAllowed(base, canon, err)) return false;
+    } else {
+        std::vector<std::string> roots;
+        defaultRoots(roots);
+        if (roots.empty()) {
+            err = "no allowed root available";
+            return false;
+        }
+        canon = fs::weakly_canonical(toPath(roots.front()), ec);
+    }
+    if (!fs::is_directory(canon, ec)) {
+        err = "not a directory: " + base;
+        return false;
+    }
+
+    const bool caseSensitive = false;  // Windows names are case-insensitive
+
+    std::vector<std::string> matches;
+    bool truncated = false;
+    std::vector<std::pair<fs::path, int>> stack;
+    stack.emplace_back(canon, 0);
+    while (!stack.empty() && !truncated) {
+        const fs::path dirPath = stack.back().first;
+        const int depth = stack.back().second;
+        stack.pop_back();
+        std::error_code ec;
+        for (fs::directory_iterator it(dirPath, fs::directory_options::skip_permission_denied, ec), end;
+             it != end && !ec; it.increment(ec)) {
+            std::error_code sec;
+            fs::path child = it->path();
+            fs::file_status st = it->symlink_status(sec);
+            if (ec || sec) continue;
+            const std::string name = pathToUtf8(child.filename());
+            if (!name.empty() && name[0] == '.') continue;  // skip hidden entries
+            if (wildcardMatch(name, patternIn, caseSensitive)) {
+                matches.push_back(pathToUtf8(child));
+                if ((int)matches.size() >= maxResults) {
+                    truncated = true;
+                    break;
+                }
+            }
+            if (fs::is_directory(st) && depth < 8 && !fs::is_symlink(st) && !isIgnoredDirName(name)) {
+                stack.emplace_back(child, depth + 1);
+            }
+        }
+    }
+    std::string arr = "[";
+    for (size_t i = 0; i < matches.size(); ++i) {
+        if (i) arr += ",";
+        appendJsonStr(arr, matches[i]);
+    }
+    arr += "]";
+    fields = "\"matches\":" + arr;
+    fields += ",\"truncated\":";
+    fields += truncated ? "true" : "false";
+    return true;
+}
+
+// Windows: run an argv program with pipes, timeout and capped captured output.
+static bool runShellWin(const std::vector<std::string>& args, const std::string& cwd,
+                        int timeoutMs, const std::string& stdinData, int& exitCode, bool& timedOut,
+                        std::string& out, std::string& errOut, std::string& error) {
+    if (args.empty() || args[0].empty()) {
+        error = "'argv' must be a non-empty array of strings";
+        return false;
+    }
+    if ((int)args.size() > kShellMaxArgs) {
+        error = "too many argv entries (max " + std::to_string(kShellMaxArgs) + ")";
+        return false;
+    }
+    size_t total = 0;
+    for (const std::string& a : args) total += a.size();
+    if (total > 16 * kShellMaxArgBytes) {
+        error = "argv is too large";
+        return false;
+    }
+
+    // Build a quoted command line (MSVC rules, simplified \" escaping).
+    std::wstring cmdLine;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) cmdLine += L" ";
+        std::wstring w = utf8ToWide(args[i]);
+        const bool needsQuote = w.empty() || w.find_first_of(L" \t\"") != std::wstring::npos;
+        if (needsQuote) cmdLine += L"\"";
+        for (wchar_t ch : w) {
+            if (ch == L'"') cmdLine += L"\\\"";
+            else cmdLine += ch;
+        }
+        if (needsQuote) cmdLine += L"\"";
+    }
+
+    SECURITY_ATTRIBUTES sa = {sizeof sa, nullptr, TRUE};
+    HANDLE outR = nullptr, outW = nullptr, errR = nullptr, errW = nullptr, inR = nullptr, inW = nullptr;
+    if (!CreatePipe(&outR, &outW, &sa, 0) || !CreatePipe(&errR, &errW, &sa, 0) ||
+        !CreatePipe(&inR, &inW, &sa, 0)) {
+        error = "CreatePipe failed";
+        return false;
+    }
+    // Keep only the child's ends inheritable.
+    SetHandleInformation(outW, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(errW, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(inR, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = inR;
+    si.hStdOutput = outW;
+    si.hStdError = errW;
+    PROCESS_INFORMATION pi = {};
+
+    BOOL ok = CreateProcessW(nullptr, &cmdLine[0], &sa, &sa, TRUE, 0, nullptr,
+                             cwd.empty() ? nullptr : toPath(cwd).c_str(), &si, &pi);
+    CloseHandle(outW);
+    CloseHandle(errW);
+    CloseHandle(inR);
+    if (!ok) {
+        error = "CreateProcess failed (" + std::to_string(GetLastError()) + ")";
+        CloseHandle(outR);
+        CloseHandle(errR);
+        CloseHandle(inW);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        if (pi.hThread) CloseHandle(pi.hThread);
+        return false;
+    }
+    CloseHandle(pi.hThread);
+
+    if (!stdinData.empty()) {
+        DWORD written = 0;
+        WriteFile(inW, stdinData.data(), (DWORD)stdinData.size(), &written, nullptr);
+    }
+    CloseHandle(inW);
+
+    const ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeoutMs;
+    auto drain = [&](HANDLE h, std::string& dst) {
+        for (;;) {
+            DWORD avail = 0;
+            if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) break;
+            if (avail == 0) return;
+            char tmp[8192];
+            DWORD n = (DWORD)std::min<DWORD>(avail, sizeof tmp);
+            DWORD got = 0;
+            if (!ReadFile(h, tmp, n, &got, nullptr) || got == 0) return;
+            if (dst.size() < kShellMaxOutput) {
+                dst.append(tmp, (size_t)std::min<DWORD>(got, (DWORD)(kShellMaxOutput - dst.size())));
+            }
+        }
+    };
+
+    for (;;) {
+        drain(outR, out);
+        drain(errR, errOut);
+        if (GetTickCount64() >= deadline) {
+            timedOut = true;
+            TerminateProcess(pi.hProcess, 1);
+            break;
+        }
+        if (WaitForSingleObject(pi.hProcess, 20) != WAIT_TIMEOUT) {
+            drain(outR, out);
+            drain(errR, errOut);
+            break;
+        }
+    }
+    CloseHandle(outR);
+    CloseHandle(errR);
+
+    if (timedOut || WaitForSingleObject(pi.hProcess, 3000) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+    }
+    WaitForSingleObject(pi.hProcess, 5000);
+
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    exitCode = (int)code;
+    return true;
+}
+
+static bool shellExecReply(const JObj& req, std::string& fields, std::string& err) {
+    if (!g_shellEnabled) {
+        err = "shell execution is disabled. Enable 'Allow shell command execution' in M-Cowork settings.";
+        return false;
+    }
+    std::vector<std::string> args = getArgv(req);
+    if (args.empty()) {
+        err = "'argv' (array of strings, no shell string) is required";
+        return false;
+    }
+    for (const std::string& a : args) {
+        if (a.size() > kShellMaxArgBytes) {
+            err = "an argv entry exceeds the size limit";
+            return false;
+        }
+    }
+    std::string cwd;
+    getStr(req, "cwd", cwd);
+    if (!cwd.empty()) {
+        fs::path canon;
+        if (!ensureAllowed(cwd, canon, err)) return false;
+        std::error_code ec;
+        if (!fs::is_directory(canon, ec)) {
+            err = "cwd is not a directory: " + cwd;
+            return false;
+        }
+        cwd = pathToUtf8(canon);
+    }
+    double timeoutD = 60000;
+    getNum(req, "timeout_ms", timeoutD);
+    const int timeoutMs = (int)std::clamp(timeoutD, 1.0, 300000.0);
+    std::string stdinStr;
+    getStr(req, "stdin", stdinStr);
+
+    int exitCode = 0;
+    bool timedOut = false;
+    std::string out, errOut, error;
+    if (!runShellWin(args, cwd, timeoutMs, stdinStr, exitCode, timedOut, out, errOut, error)) {
+        err = error;
+        return false;
+    }
+    fields = "\"argv\":[";
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) fields += ",";
+        appendJsonStr(fields, args[i]);
+    }
+    fields += "],\"exit_code\":" + std::to_string(exitCode);
+    fields += ",\"timed_out\":";
+    fields += timedOut ? "true" : "false";
+    fields += ",\"stdout\":";
+    appendJsonStr(fields, out);
+    fields += ",\"stderr\":";
+    appendJsonStr(fields, errOut);
+    return true;
+}
+
+// ============================================================================
 // Command handling
 // ============================================================================
 
@@ -1245,6 +1970,53 @@ static std::string dispatch(const JObj& req, const std::string& cmd, bool& endSe
         return okReply(req);
     }
 
+    if (cmd == "fs_list" || cmd == "fs_read" || cmd == "fs_write" || cmd == "fs_mkdir" ||
+        cmd == "fs_delete" || cmd == "fs_search" || cmd == "shell_exec") {
+        setStatus(L"filesystem");
+        if (cmd == "fs_list") {
+            std::string p;
+            if (!getStr(req, "path", p) || p.empty()) return errReply(req, "'path' is required");
+            fs::path canon;
+            if (!ensureAllowed(p, canon, err)) return errReply(req, err);
+            std::error_code ec;
+            if (!fs::is_directory(canon, ec)) return errReply(req, "not a directory: " + p);
+            double maxD = 200;
+            getNum(req, "max_entries", maxD);
+            const int maxEntries = (int)std::clamp(maxD, 1.0, 500.0);
+            return listDirectoryReply(req, canon, maxEntries);
+        }
+        if (cmd == "fs_read") {
+            std::string fields;
+            if (!readFileReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+        if (cmd == "fs_write") {
+            std::string fields;
+            if (!writeFileReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+        if (cmd == "fs_mkdir") {
+            std::string fields;
+            if (!mkdirReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+        if (cmd == "fs_delete") {
+            std::string fields;
+            if (!deletePathReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+        if (cmd == "fs_search") {
+            std::string fields;
+            if (!searchReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+        if (cmd == "shell_exec") {
+            std::string fields;
+            if (!shellExecReply(req, fields, err)) return errReply(req, err);
+            return okReply(req, fields);
+        }
+    }
+
     if (cmd == "end_session") {
         endSession = true;
         return okReply(req);
@@ -1307,6 +2079,13 @@ static const char* TOOL_DEFINITIONS = R"JSON([
   {"name":"keyboard_type","description":"Type text into the focused window like a person typing. Newlines press Enter and tabs press Tab.","input_schema":{"type":"object","properties":{"text":{"type":"string"},"delay_ms":{"type":"integer","description":"Average delay between characters, 0-500. Default 12"}},"required":["text"]}},
   {"name":"keyboard_key","description":"Press a key or shortcut such as \"enter\", \"ctrl+c\" or \"alt+tab\". Several shortcuts can be given separated by spaces, e.g. \"ctrl+a ctrl+c\". Names: ctrl, shift, alt, win, enter, tab, esc, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f24, plus single characters (a, 5, ...; use \"plus\" for the + key).","input_schema":{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}},
   {"name":"wait","description":"Pause for a number of milliseconds (max 60000), e.g. to let a page or app finish loading.","input_schema":{"type":"object","properties":{"ms":{"type":"integer"}},"required":["ms"]}},
+  {"name":"fs_list","description":"List the entries of a directory (name, type, size, mtime). Paths must stay inside an allowed root (the user's home and temp folder, or roots given via --allow-root).","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Directory path (absolute, or relative to the home root)"},"max_entries":{"type":"integer","description":"Optional cap, default 200, max 500"}},"required":["path"]}},
+  {"name":"fs_read","description":"Read a text or binary file and return its content (content, or content_base64 for binary). Reads are capped in size and limited to allowed roots.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"File path"},"max_bytes":{"type":"integer","description":"Optional byte cap, default 65536, max 1048576"}},"required":["path"]}},
+  {"name":"fs_write","description":"Create or overwrite a file. Pass text as 'text' (UTF-8) or raw bytes as 'base64'. Overwriting requires overwrite=true unless the file is new.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"File path to create or replace"},"text":{"type":"string","description":"UTF-8 content to write"},"base64":{"type":"string","description":"Optional base64 content for binary files"},"overwrite":{"type":"boolean","description":"Replace an existing file. Default true"}},"required":["path"]}},
+  {"name":"fs_mkdir","description":"Create a directory (and any missing parents). Limited to allowed roots.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Directory path to create"}},"required":["path"]}},
+  {"name":"fs_delete","description":"Delete a file or empty directory. Directory contents require recursive=true. Never use on paths the user may need. Limited to allowed roots.","input_schema":{"type":"object","properties":{"path":{"type":"string","description":"Path to delete"},"recursive":{"type":"boolean","description":"Must be true to delete directories non-empty contents. Default false"}},"required":["path"]}},
+  {"name":"fs_search","description":"Search file names under a directory tree with a wildcard pattern (* and ?). Hidden files, dependency folders (.git, node_modules, ...) are skipped.","input_schema":{"type":"object","properties":{"pattern":{"type":"string","description":"Wildcard pattern, e.g. *.txt or report-*.md"},"path":{"type":"string","description":"Optional base directory, default the home root"},"max_results":{"type":"integer","description":"Optional cap, default 100, max 200"}},"required":["pattern"]}},
+  {"name":"shell_exec","description":"Execute a program with an argv array (never a shell string) and return exit code, stdout and stderr. Only available when the user enabled shell tools in settings; requires a timeout (max 300000 ms) and returns at most 256 KiB of combined output. Optional 'stdin' feeds data to the process. Optional 'cwd' must be inside an allowed root.","input_schema":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"},"description":"Program plus arguments, e.g. [\"cmd\",\"/c\",\"dir\"]"},"cwd":{"type":"string","description":"Optional working directory (inside allowed roots)"},"timeout_ms":{"type":"integer","description":"Default 60000, max 300000"},"stdin":{"type":"string","description":"Optional data piped to the program's stdin"}},"required":["argv"]}},
   {"name":"end_session","description":"Finish: remove the overlay, restore the normal cursor and give mouse control back to the user. Call this when the task is done.","input_schema":{"type":"object","properties":{},"required":[]}}
 ])JSON";
 
@@ -1325,6 +2104,8 @@ static void printHelp() {
         "  --idle-timeout <sec>  End the session after this long without commands (default 120, 0 = never)\n"
         "  --no-cursor           Skip custom cursor replacement\n"
         "  --no-lock             Don't block manual mouse movement\n"
+        "  --enable-shell        Allow the shell_exec tool (off by default)\n"
+        "  --allow-root <path>   Extend the fs/shell allowed roots (default: home and temp)\n"
         "  --describe            Print the tool definitions as JSON and exit\n"
         "  --restore-cursor      Restore default Windows cursors and exit\n"
         "  --help                Show this help\n"
@@ -1367,6 +2148,15 @@ static bool parseArgs(int argc, char** argv, int& exitCode) {
         }
         if (arg == "--idle-timeout" && i + 1 < argc) {
             g_idleTimeoutSec = std::max(0, std::atoi(argv[++i]));
+            continue;
+        }
+        if (arg == "--enable-shell") {
+            g_shellEnabled = true;
+            continue;
+        }
+        if (arg == "--allow-root" && i + 1 < argc) {
+            std::string root = argv[++i];
+            if (!root.empty()) g_allowRoots.push_back(root);
             continue;
         }
         if (arg == "--speed" && i + 1 < argc) {

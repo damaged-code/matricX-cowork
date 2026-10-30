@@ -52,7 +52,8 @@ protected:
 
 private:
     void setupEmptyState(QWidget *container);
-    void addMessage(const QString &text, bool fromUser);
+    void addMessage(const QString &text, bool fromUser, const QString &imagePath = QString());
+    void addToolResultRow(const QString &text, const QString &imagePath);
     void addErrorMessage(const QString &errorMessage);
     void addActionCard(const QString &toolName, const QJsonObject &args);
     void updateStatusIndicator(const QString &text, bool active);
@@ -60,6 +61,14 @@ private:
     void send();
     void runAgentLoop();
     void executeNextToolCall(const QList<ToolCallRequest> &calls, int index);
+
+    // Live streaming: a plain assistant-style card updated with model deltas
+    // until the response callback persists the final message.
+    void appendStreamingText(const QString &diff);
+    void clearStreamingCard();
+
+    // Copies attachments that live outside AppData into a session-safe folder.
+    QString persistAttachment(const QString &path);
 
     // Thinking bubble
     void showThinkingBubble(const QString &detail);
@@ -88,6 +97,16 @@ private:
     QElapsedTimer m_thinkingClock;
     QString m_thinkingDetailText;
     int m_thinkingDots = 0;
+
+    // Live streaming card (model deltas rendered as they arrive)
+    QPointer<QWidget> m_streamingRow;
+    QLabel *m_streamingBody = nullptr;
+    QString m_streamingBuf;
+    QString m_streamingReasoningBuf;
+
+    // Generation counter: incremented on every new run and by the stop
+    // button; callbacks compare against it and drop out when stale.
+    quint64 m_runId = 0;
 
     // Floating input capsule
     QFrame *m_capsule = nullptr;

@@ -1,5 +1,9 @@
 #include "ui/ChatArea.h"
 
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -11,11 +15,14 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
+#include <QPixmap>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "core/ConversationCompactor.h"
 #include "core/Icons.h"
 #include "core/SessionManager.h"
 #include "core/SettingsManager.h"
@@ -190,9 +197,17 @@ ChatArea::ChatArea(QWidget *parent) : QWidget(parent) {
 
     connect(m_sendBtn, &QPushButton::clicked, this, [this] {
         if (m_busy) {
+            // Stop the whole run: invalidate every scheduled continuation,
+            // cancel the in-flight request and stop driving the desktop.
+            ++m_runId;
+            m_ai.abort();
             m_tool.endSession();
-            updateStatusIndicator("Session stopped.", false);
             m_busy = false;
+            m_input->setEnabled(true);
+            m_input->setFocus();
+            clearStreamingCard();
+            removeThinkingBubble();
+            updateStatusIndicator("Session stopped.", false);
             updateSendButtonState();
         } else {
             send();
@@ -395,6 +410,12 @@ void ChatArea::loadCurrentSession() {
     const auto s = SessionManager::instance().currentSession();
     m_history.clear();
 
+    // A rebuild deletes every row widget; reset the live-run pointers so
+    // nothing references a deleted card during an active run.
+    m_currentActionCard = nullptr;
+    m_streamingRow = nullptr;      // widget is gone; streaming re-creates on next diff
+    m_streamingBody = nullptr;
+
     m_hasMessages = !s.messages.isEmpty();
     m_emptyStateWidget->setVisible(!m_hasMessages);
     m_threadTitleLabel->setText(s.title.isEmpty() ? "New Chat" : s.title);
@@ -408,7 +429,14 @@ void ChatArea::loadCurrentSession() {
                                        buildThinkingRow(msg.content, false, &body, &detail));
             continue;
         }
-        addMessage(msg.content, msg.role == "user");
+        if (msg.role == "tool") {
+            // Persisted tool result: show as a quiet gray line (plus image
+            // preview for screenshots) and feed the model as a user message.
+            addToolResultRow(msg.content, msg.imagePath);
+            m_history.append({"user", msg.content, msg.imagePath});
+            continue;
+        }
+        addMessage(msg.content, msg.role == "user", msg.imagePath);
         m_history.append({msg.role, msg.content});
     }
 
@@ -442,7 +470,7 @@ void ChatArea::paintEvent(QPaintEvent *) {
     p.fillRect(rect(), dark ? QColor(24, 24, 27) : QColor(255, 255, 255));
 }
 
-void ChatArea::addMessage(const QString &text, bool fromUser) {
+void ChatArea::addMessage(const QString &text, bool fromUser, const QString &imagePath) {
     const bool dark = ThemeManager::instance().isDark();
 
     // Each row lives in its own container widget so loadCurrentSession() can delete
@@ -456,6 +484,11 @@ void ChatArea::addMessage(const QString &text, bool fromUser) {
 
     if (fromUser) {
         row->addStretch();
+
+        auto *col = new QVBoxLayout;
+        col->setContentsMargins(0, 0, 0, 0);
+        col->setSpacing(6);
+
         auto *bubble = new QLabel(text, rowWidget);
         bubble->setWordWrap(true);
         bubble->setMaximumWidth(540);
@@ -463,7 +496,19 @@ void ChatArea::addMessage(const QString &text, bool fromUser) {
         bubble->setStyleSheet(
             "background: #27272a; color: #f4f4f5; border: 1px solid #3f3f46;"
             "border-radius: 14px; padding: 10px 16px; font-size: 14px; line-height: 1.45;");
-        row->addWidget(bubble);
+        col->addWidget(bubble, 0, Qt::AlignRight);
+
+        if (!imagePath.isEmpty()) {
+            QPixmap pm(imagePath);
+            if (!pm.isNull()) {
+                auto *img = new QLabel(rowWidget);
+                img->setPixmap(pm.scaledToWidth(280, Qt::SmoothTransformation));
+                img->setStyleSheet("border: 1px solid #3f3f46; border-radius: 10px;");
+                col->addWidget(img, 0, Qt::AlignRight);
+            }
+        }
+
+        row->addLayout(col);
     } else {
         auto *card = new QFrame(rowWidget);
         card->setObjectName("assistantCard");
@@ -497,7 +542,47 @@ void ChatArea::addMessage(const QString &text, bool fromUser) {
                                  : "color: #18181b; font-size: 14px; line-height: 1.5;");
         cardLayout->addWidget(body);
 
+        if (!imagePath.isEmpty()) {
+            QPixmap pm(imagePath);
+            if (!pm.isNull()) {
+                auto *img = new QLabel(card);
+                img->setPixmap(pm.scaledToWidth(320, Qt::SmoothTransformation));
+                img->setStyleSheet("border: 1px solid #3f3f46; border-radius: 10px;");
+                cardLayout->addWidget(img);
+            }
+        }
+
         row->addWidget(card, 1);
+    }
+
+    m_msgLayout->insertWidget(m_msgLayout->count() - 1, rowWidget);
+    QTimer::singleShot(10, this, [this] {
+        m_scroll->verticalScrollBar()->setValue(m_scroll->verticalScrollBar()->maximum());
+    });
+}
+
+// Quiet gray row for persisted tool results (plus optional screenshot preview).
+void ChatArea::addToolResultRow(const QString &text, const QString &imagePath) {
+    auto *rowWidget = new QWidget(this);
+    rowWidget->setStyleSheet("background: transparent;");
+    auto *row = new QVBoxLayout(rowWidget);
+    row->setContentsMargins(24, 0, 24, 0);
+    row->setSpacing(6);
+
+    auto *lbl = new QLabel(text, rowWidget);
+    lbl->setWordWrap(true);
+    lbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    lbl->setStyleSheet("color: #71717a; font-size: 12px;");
+    row->addWidget(lbl);
+
+    if (!imagePath.isEmpty()) {
+        QPixmap pm(imagePath);
+        if (!pm.isNull()) {
+            auto *img = new QLabel(rowWidget);
+            img->setPixmap(pm.scaledToWidth(280, Qt::SmoothTransformation));
+            img->setStyleSheet("border: 1px solid #2e2e33; border-radius: 8px;");
+            row->addWidget(img);
+        }
     }
 
     m_msgLayout->insertWidget(m_msgLayout->count() - 1, rowWidget);
@@ -595,7 +680,12 @@ void ChatArea::showThinkingBubble(const QString &detail) {
                 }
                 m_thinkingDots = (m_thinkingDots + 1) % 4;
                 if (m_thinkingBody) {
-                    m_thinkingBody->setText(QString("Thinking%1").arg(QString(m_thinkingDots, '.')));
+                    if (!m_streamingReasoningBuf.isEmpty()) {
+                        // Live preview of the model's reasoning (tail only).
+                        m_thinkingBody->setText(m_streamingReasoningBuf.right(320));
+                    } else {
+                        m_thinkingBody->setText(QString("Thinking%1").arg(QString(m_thinkingDots, '.')));
+                    }
                 }
                 if (m_thinkingDetail) {
                     const qint64 secs = m_thinkingClock.elapsed() / 1000;
@@ -632,6 +722,89 @@ void ChatArea::removeThinkingBubble() {
     m_thinkingBody = nullptr;
     m_thinkingDetail = nullptr;
     m_thinkingDetailText.clear();
+    m_streamingReasoningBuf.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Live streaming card
+// ---------------------------------------------------------------------------
+
+void ChatArea::appendStreamingText(const QString &diff) {
+    if (diff.isEmpty()) return;
+    if (!m_streamingRow) {
+        auto *rowWidget = new QWidget(this);
+        rowWidget->setStyleSheet("background: transparent;");
+        auto *row = new QHBoxLayout(rowWidget);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(10);
+
+        auto *card = new QFrame(rowWidget);
+        card->setObjectName("streamingCard");
+        card->setStyleSheet("QFrame#streamingCard { background: transparent; border: none; }");
+        auto *cardLayout = new QVBoxLayout(card);
+        cardLayout->setContentsMargins(0, 0, 0, 0);
+        cardLayout->setSpacing(6);
+
+        auto *hdr = new QHBoxLayout;
+        hdr->setSpacing(6);
+        auto *botIcon = new QLabel(card);
+        botIcon->setPixmap(icons::pixmap(icons::IconType::Bot, QSize(18, 18), QColor(16, 185, 129)));
+        hdr->addWidget(botIcon);
+        auto *name = new QLabel("M-Cowork", card);
+        name->setStyleSheet("font-size: 13px; font-weight: 600; color: #f4f4f5;");
+        hdr->addWidget(name);
+        hdr->addStretch();
+        cardLayout->addLayout(hdr);
+
+        auto *body = new QLabel(card);
+        body->setWordWrap(true);
+        body->setTextFormat(Qt::PlainText);
+        body->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        body->setStyleSheet(ThemeManager::instance().isDark()
+                                ? "color: #e4e4e7; font-size: 14px; line-height: 1.5;"
+                                : "color: #18181b; font-size: 14px; line-height: 1.5;");
+        cardLayout->addWidget(body);
+
+        m_streamingBody = body;
+        row->addWidget(card, 1);
+
+        m_msgLayout->insertWidget(m_msgLayout->count() - 1, rowWidget);
+        m_streamingRow = rowWidget;
+    }
+
+    m_streamingBuf += diff;
+    if (m_streamingBody) m_streamingBody->setText(m_streamingBuf);
+    QTimer::singleShot(10, this, [this] {
+        m_scroll->verticalScrollBar()->setValue(m_scroll->verticalScrollBar()->maximum());
+    });
+}
+
+void ChatArea::clearStreamingCard() {
+    if (m_streamingRow) {
+        m_streamingRow->deleteLater();
+        m_streamingRow = nullptr;
+    }
+    m_streamingBody = nullptr;
+    m_streamingBuf.clear();
+    m_streamingReasoningBuf.clear();
+}
+
+// Keeps attachments usable after restarts: files living outside the app data
+// area (temp screenshots etc.) are copied under AppData/attachments.
+QString ChatArea::persistAttachment(const QString &path) {
+    if (path.isEmpty()) return QString();
+    const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QDir appDir(appData);
+    if (QDir::isAbsolutePath(path) && QFileInfo(path).canonicalFilePath().startsWith(appDir.absolutePath())) {
+        return path;
+    }
+    QDir attDir(appDir.filePath("attachments"));
+    if (!attDir.mkpath(".")) return path;
+    const QFileInfo fi(path);
+    QString name = fi.fileName();
+    if (name.isEmpty()) name = "attachment.png";
+    const QString dest = attDir.filePath(QString("%1-%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(name));
+    return QFile::copy(path, dest) ? dest : path;
 }
 
 void ChatArea::addErrorMessage(const QString &errorMessage) {
@@ -811,45 +984,69 @@ void ChatArea::runAgentLoop() {
     m_input->setEnabled(false);
     updateSendButtonState();
     updateStatusIndicator(QString(), false);
-    showThinkingBubble("Waiting for the model");
 
-    QJsonArray tools = m_tool.definitions();
+    const quint64 runId = ++m_runId;
     const QString currentSid = SessionManager::instance().currentSessionId();
 
-    m_ai.sendMessage(m_history, tools, [this, currentSid](const AiResponse &resp) {
-        if (!resp.success) {
-            m_busy = false;
-            m_input->setEnabled(true);
-            m_input->setFocus();
-            updateSendButtonState();
-            updateStatusIndicator(QString(), false);
+    // Fresh streaming card per model turn; leftovers from a previous turn go.
+    clearStreamingCard();
+
+    // Compaction happens per request on a copy; the session store is untouched.
+    const QList<ChatMessage> payload = ConversationCompactor::compact(m_history);
+    showThinkingBubble(QString("Waiting for the model · ~%1 tokens context")
+                           .arg(ConversationCompactor::estimateTokens(payload)));
+
+    QJsonArray tools = m_tool.definitions();
+
+    m_ai.sendMessage(
+        payload, tools,
+        [this, runId, currentSid](const AiResponse &resp) {
+            if (runId != m_runId) return;
+
+            clearStreamingCard();
             removeThinkingBubble();
-            addErrorMessage(resp.errorMessage);
-            return;
-        }
 
-        // Persist any provider-supplied reasoning so it stays visible in the transcript.
-        if (!resp.reasoning.trimmed().isEmpty() && SettingsManager::instance().showReasoning()) {
-            SessionManager::instance().appendMessage(currentSid, "thinking", resp.reasoning.trimmed());
-        }
+            if (!resp.success) {
+                m_busy = false;
+                m_input->setEnabled(true);
+                m_input->setFocus();
+                updateSendButtonState();
+                updateStatusIndicator(QString(), false);
+                addErrorMessage(resp.errorMessage);
+                return;
+            }
 
-        if (!resp.text.isEmpty()) {
-            SessionManager::instance().appendMessage(currentSid, "assistant", resp.text);
-            m_history.append({"assistant", resp.text});
-        }
+            // Persist any provider-supplied reasoning so it stays visible in the transcript.
+            if (!resp.reasoning.trimmed().isEmpty() && SettingsManager::instance().showReasoning()) {
+                SessionManager::instance().appendMessage(currentSid, "thinking", resp.reasoning.trimmed());
+            }
 
-        if (resp.toolCalls.isEmpty()) {
-            m_busy = false;
-            m_input->setEnabled(true);
-            m_input->setFocus();
-            updateSendButtonState();
-            updateStatusIndicator(QString(), false);
-            removeThinkingBubble();
-            return;
-        }
+            if (!resp.text.isEmpty()) {
+                SessionManager::instance().appendMessage(currentSid, "assistant", resp.text);
+                m_history.append({"assistant", resp.text});
+            }
 
-        executeNextToolCall(resp.toolCalls, 0);
-    });
+            if (resp.toolCalls.isEmpty()) {
+                m_busy = false;
+                m_input->setEnabled(true);
+                m_input->setFocus();
+                updateSendButtonState();
+                updateStatusIndicator(QString(), false);
+                return;
+            }
+
+            executeNextToolCall(resp.toolCalls, 0);
+        },
+        [this, runId](const QString &textDiff, const QString &reasoningDiff) {
+            if (runId != m_runId) return;
+            if (!textDiff.isEmpty()) appendStreamingText(textDiff);
+            if (!reasoningDiff.isEmpty()) {
+                m_streamingReasoningBuf += reasoningDiff + "\n";
+                if (m_thinkingBody) {
+                    m_thinkingBody->setText(m_streamingReasoningBuf.right(320));
+                }
+            }
+        });
 }
 
 void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int index) {
@@ -864,8 +1061,19 @@ void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int inde
 
     addActionCard(tc.name, tc.arguments);
 
-    auto proceed = [this, calls, index, tc]() {
-        m_tool.call(tc.name, tc.arguments, [this, calls, index, tc](const QJsonObject &reply) {
+    const quint64 runId = m_runId;
+    const QString currentSid = SessionManager::instance().currentSessionId();
+
+    auto persistToolResult = [this, currentSid](const QString &toolName, const QString &resultText,
+                                                QString imgPath) {
+        const QString storedPath = persistAttachment(imgPath);
+        SessionManager::instance().appendMessage(currentSid, "tool", resultText, storedPath);
+        return storedPath;
+    };
+
+    auto proceed = [this, runId, calls, index, tc, persistToolResult]() {
+        m_tool.call(tc.name, tc.arguments, [this, runId, calls, index, tc, persistToolResult](const QJsonObject &reply) {
+            if (runId != m_runId) return;
             const bool ok = reply["ok"].toBool();
             QString imgPath;
             if (reply.contains("path")) imgPath = reply.value("path").toString();
@@ -876,11 +1084,16 @@ void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int inde
                                                toolResultStr, imgPath);
             }
 
-            // If the tool was screenshot, attach the image path so the AI model perceives the desktop
-            if (tc.name == "screenshot" && ok && !imgPath.isEmpty()) {
-                m_history.append({"user", QString("Tool result for %1: %2").arg(tc.name, toolResultStr), imgPath});
+            // Persist the tool result (with its image) so it survives restarts.
+            QString historyText = QString("Tool result for %1: %2").arg(tc.name, toolResultStr);
+            const QString storedPath = persistToolResult(tc.name, historyText, imgPath);
+
+            // If the tool was screenshot, attach the image path so the AI model
+            // perceives the desktop. History keeps the stable stored path.
+            if (tc.name == "screenshot" && ok && !storedPath.isEmpty()) {
+                m_history.append({"user", historyText, storedPath});
             } else {
-                m_history.append({"user", QString("Tool result for %1: %2").arg(tc.name, toolResultStr), QString()});
+                m_history.append({"user", historyText, QString()});
             }
             executeNextToolCall(calls, index + 1);
         });
@@ -915,18 +1128,22 @@ void ChatArea::executeNextToolCall(const QList<ToolCallRequest> &calls, int inde
 
         m_msgLayout->insertWidget(m_msgLayout->count() - 1, confirmFrame);
 
-        connect(allowBtn, &QPushButton::clicked, this, [confirmFrame, proceed] {
+        connect(allowBtn, &QPushButton::clicked, this, [this, runId, confirmFrame, proceed] {
             confirmFrame->hide();
             confirmFrame->deleteLater();
+            if (runId != m_runId) return;
             proceed();
         });
-        connect(denyBtn, &QPushButton::clicked, this, [this, confirmFrame, tc, calls, index] {
+        connect(denyBtn, &QPushButton::clicked, this, [this, runId, currentSid, confirmFrame, tc, calls, index] {
             confirmFrame->hide();
             confirmFrame->deleteLater();
+            if (runId != m_runId) return;
             if (m_currentActionCard) {
                 m_currentActionCard->setStatus(ActionStepCard::Status::Failed, "User denied execution permission.");
             }
             m_history.append({"user", QString("Tool execution for %1 denied by user.").arg(tc.name)});
+            SessionManager::instance().appendMessage(
+                currentSid, "tool", QString("Tool execution for %1 denied by user.").arg(tc.name), QString());
             executeNextToolCall(calls, index + 1);
         });
     } else {

@@ -8,12 +8,13 @@ fits together, and what is still missing.
 ## 1. What M-Cowork is
 
 A cross-platform desktop AI agent that chats with an LLM and lets that model **control the
-computer** — move/click the mouse, type, press shortcuts, take screenshots, and see the
-result. The UI imitates OpenAI Codex / ChatGPT Desktop: frameless rounded window,
-collapsible sidebar, centered chat column, floating input capsule.
+computer** — move/click the mouse, type, press shortcuts, take screenshots, read and write
+files, run allowed shell commands, and see the result. The UI imitates OpenAI Codex /
+ChatGPT Desktop: frameless rounded window, collapsible sidebar, centered chat column,
+floating input capsule.
 
 - UI: Qt 6 Widgets, C++17 (`m_cowork_ui`)
-- Engine: standalone native process (`matricX-cowork`, v0.4.0)
+- Engine: standalone native process (`matricX-cowork`, v0.5.0)
 - Platforms: Windows 10/11, Linux (X11; Wayland with `grim`/`import` fallback)
 - Tags: C++17, Qt6, CMake, JSON-lines IPC, Win32, X11
 
@@ -52,13 +53,16 @@ tool call fails with a clear error.
 src/
   main.cpp                 QApplication, window icon/font, shows MainWindow
   ai/
-    AiClient.{h,cpp}       Provider HTTP: chat, tool calls, model list, Whisper
+    AiClient.{h,cpp}       Provider HTTP: streamed chat, tool calls, abort,
+                           retry/backoff, model list, Whisper
     AntigravityAuth.{h,cpp} Google OAuth loopback flow (Antigravity/Gemini)
   core/
     Assets.{h,cpp}         Resource lookup (assets/ both on disk and packaged)
     AudioRecorder.{h,cpp}  Mic capture -> temp audio file
+    ConversationCompactor.*  Per-request context budget / summary / merge
     Icons.{h,cpp}          Lucide-style icon painting to QPixmap/QIcon
-    ProviderKeyManager.*   Multiple API keys per provider
+    ProviderKeyManager.*   Multiple API keys per provider (metadata-only JSON)
+    SecretStore.{h,cpp}    DPAPI / libsecret / obfuscated-file secret storage
     SessionManager.*       Sessions, messages, archive/restore/delete, sessions.json
     SettingsManager.*      QSettings-backed prefs + provider registry
     Theme.h                Geometry + Codex dark palette constants
@@ -81,7 +85,7 @@ src/
 tools/matricX-cowork/      Engine sources + built executable + cursor asset
 assets/                    Icons and app resources
 scripts/                   build/run/package/smoke-test helpers
-.github/workflows/         Manual build + smoke tests (Linux & Windows)
+.github/workflows/         Manual build + smoke tests; tag-driven release packaging
 website/                   Static marketing site (deployed on Vercel)
 packages/msys2-packages.txt
 ```
@@ -94,34 +98,46 @@ packages/msys2-packages.txt
 
 1. `send()` — handles slash commands (`/help`, `/tools`, `/tool <name> {json}`,
    `/models`, `/clear`) or appends the user message to `SessionManager` and `m_history`.
-2. `runAgentLoop()` — sets `m_busy`, shows the thinking bubble, sends
-   `m_history` + `CoworkTool::definitions()` to `AiClient::sendMessage`.
-3. Response handling:
+2. `runAgentLoop()` — takes a `runId = ++m_runId`, sets `m_busy`, shows the thinking
+   bubble, compacts the history **on a copy** with `ConversationCompactor::compact`
+   (token estimate shown in the bubble), and sends the payload +
+   `CoworkTool::definitions()` to `AiClient::sendMessage` with a stream callback.
+3. Streaming callback — guarded by `runId != m_runId`; appends text deltas to a live
+   streaming card and reasoning deltas to the thinking bubble preview.
+4. Response handling (guarded the same way):
    - error → unlock input, show `addErrorMessage()` (with Retry).
    - `reasoning` → persisted as role `thinking` when `showReasoning()`.
    - `text` → persisted and rendered as markdown.
    - no tool calls → done, unlock input, remove thinking bubble.
    - tool calls → `executeNextToolCall(calls, 0)`.
-4. `executeNextToolCall()` — per call: render `ActionStepCard`, optionally show an
-   Allow/Deny prompt (`requireConfirmation()`), call `CoworkTool::call`, append
-   `"Tool result for <name>: <json>"` to `m_history`, then recurse to the next call.
-5. After the last call → `runAgentLoop()` again (ReAct loop) until the model stops
+5. `executeNextToolCall()` — per call: render `ActionStepCard`, optionally show an
+   Allow/Deny prompt (`requireConfirmation()`), call `CoworkTool::call`, persist the
+   result as a session message with role `tool` (attachments copied into app data via
+   `persistAttachment`), append `"Tool result for <name>: <json>"` to `m_history`,
+   then recurse to the next call.
+6. After the last call → `runAgentLoop()` again (ReAct loop) until the model stops
    requesting tools.
 
 Screenshot results carry `imagePath`; `AiClient` base64-encodes the PNG and sends it as a
-vision part for Gemini, OpenAI-compatible, and Anthropic requests.
+vision part for Gemini, OpenAI-compatible, and Anthropic requests. Persisted tool results
+reload as quiet gray rows and are fed back to the model as `role: "user"` messages.
 
-The Stop button calls `m_tool.endSession()` and clears `m_busy` — see gaps in §11.
+The Stop button invalidates the whole run: `++m_runId`, `m_ai.abort()` (kills the
+in-flight `QNetworkReply`), and `m_tool.endSession()`. All callbacks compare their
+captured `runId` against `m_runId` and drop out silently when stale.
 
 ---
 
 ## 5. Engine protocol (`matricX-cowork`)
 
-- Launched lazily: `matricX-cowork --glow green --speed normal --idle-timeout 120`
-- `--describe` prints a JSON array of tool schemas (cached in `m_defs`).
+- Launched lazily from the UI:
+  `matricX-cowork --glow green --speed normal --idle-timeout 120 [--enable-shell]`
+- `--describe` prints a JSON array of **all 17 tool schemas** regardless of
+  `--enable-shell`; hiding `shell_exec` before opt-in is the UI's job
+  (`CoworkTool::definitions()` filters it). Cache lives in `m_defs`.
 - One JSON object per line on stdin; replies echo `id`; lines without `id` are events
   (`ready`, `stopped`, aborts).
-- 10 tools:
+- 17 tools:
 
 | Tool | Args | Notes |
 |---|---|---|
@@ -134,10 +150,18 @@ The Stop button calls `m_tool.endSession()` and clears `m_busy` — see gaps in 
 | `keyboard_type` | `text,delay_ms?` | newline = Enter, tab = Tab |
 | `keyboard_key` | `keys` | `enter`, `ctrl+c`, `alt+tab`, `f1–f24`, … |
 | `wait` | `ms` | ≤ 60 000 |
+| `fs_list` | `path` | directory listing inside allowed roots |
+| `fs_read` | `path` | text read, 1 MiB cap, allowed roots only |
+| `fs_write` | `path,text,append?` | write/create, 2 MiB cap, allowed roots only |
+| `fs_mkdir` | `path` | create directories inside allowed roots |
+| `fs_delete` | `path,recursive?` | delete file/dir; recursive requires the flag |
+| `fs_search` | `path,pattern` | glob search with result cap |
+| `shell_exec` | `argv,cwd?,timeout_ms?` | **argv array only** (never a shell string), 256 KiB output cap, 300 s timeout, exit code returned; requires `--enable-shell` |
 | `end_session` | — | release control, remove overlay |
 
-Esc aborts; idle timeout cleans up. There is **no shell, PowerShell, or filesystem tool**
-on `main`.
+Sandbox: filesystem tools and shell `cwd` are restricted to `$HOME` + system temp +
+any `--allow-root <dir>` values on the command line. Outside those roots the engine
+refuses with `ok: false` and an explanatory error. Esc aborts; idle timeout cleans up.
 
 ---
 
@@ -156,9 +180,16 @@ on `main`.
 | `ollama` | Ollama / local | `localhost:11434/v1` | `llama3.3` |
 
 Dispatch in `AiClient`: `sendGemini`, `sendOpenAiCompatible`, `sendAnthropic`.
+All three run through a shared `postWithRetry` engine: SSE streaming (diffs forwarded to
+the `StreamCallback`), automatic fallback to parsing the full body when the server never
+streams (some proxies ignore `stream`), and retry (≤ 3 attempts, backoff 1.2 s / 3.2 s)
+only for transport failures and 429/5xx responses **before** any streamed output — never
+for 4xx bodies and never mid-stream. `abort()` cancels the current request; its callback
+does not fire.
 Also: `fetchAvailableModels()` (⚡ autodetect) and `transcribeAudio()` (Whisper via
 Groq/OpenAI). Gemini can use the API key or Google Antigravity OAuth
-(`AntigravityAuth`: loopback server, `state` check, 180 s timeout, refresh token).
+(`AntigravityAuth`: loopback server, `state` check, 180 s timeout, refresh token; OAuth
+requests stay non-streamed).
 
 ---
 
@@ -166,16 +197,19 @@ Groq/OpenAI). Gemini can use the API key or Google Antigravity OAuth
 
 | Data | Location | Format |
 |---|---|---|
-| Sessions + messages | `QStandardPaths::AppDataLocation/sessions.json` | JSON |
-| Provider keys | same dir, `provider_keys.json` | JSON, **plaintext** |
-| Legacy single key | `QSettings("MCowork","MCowork")` → `ai/<provider>/apiKey` | QSettings/registry |
-| Prefs | same QSettings | `ai/provider`, `ai/<p>/model`, `ai/<p>/baseUrl`, `safety/requireConfirmation`, `ui/*` |
+| Sessions + messages | `QStandardPaths::AppDataLocation/sessions.json` | JSON; `ChatMessageItem.role` may be `user`/`assistant`/`tool`/`thinking`, optional `imagePath` |
+| Tool attachments | same dir, `attachments/` | images copied here by `persistAttachment` so previews survive restarts |
+| Provider keys (per-entry metadata) | same dir, `provider_keys.json` | JSON, **no secrets** — id/label/isActive/createdAt only |
+| Provider key secrets | `SecretStore` (`providerKey/<pid>`, `pkmKey/<entryId>`) | Windows DPAPI; Linux libsecret when available; otherwise an obfuscated, chmod 600 `secrets.json` in the same dir |
+| Legacy single key | `QSettings("MCowork","MCowork")` → `ai/<provider>/apiKey` | migrated into `SecretStore` on first read, then scrubbed |
+| Prefs | same QSettings | `ai/provider`, `ai/<p>/model`, `ai/<p>/baseUrl`, `safety/requireConfirmation`, `safety/allowShell`, `ui/*` |
 
-Notable defaults: provider `gemini`, `requireConfirmation = false`, `showReasoning = true`,
-window controls `titlebar / right / circle / medium`.
+Notable defaults: provider `gemini`, `requireConfirmation = true`, `allowShell = false`,
+`showReasoning = true`, window controls `titlebar / right / circle / medium`.
 
 Session lifecycle: create, rename, set model, archive, restore, permanent delete.
-`ChatMessageItem` stores only `role`, `content`, `timestamp` — **not** image paths.
+Auto-title: sessions titled `New Session`/`Current Session`/`New Chat` are renamed from
+the first real user message (tool results and slash commands excluded).
 
 ---
 
@@ -185,10 +219,13 @@ Session lifecycle: create, rename, set model, archive, restore, permanent delete
   other platforms use drag + edge resize.
 - `Sidebar` — search filter over titles, session menu (rename/archive/delete), collapse.
 - `ChatArea` — top bar (controls/title/status), scrollable centered 780 px column,
-  markdown assistant cards, user bubbles, thinking bubble, action cards, error cards,
-  floating capsule (model selector, mic, send/stop), sidebar-collapsed controls.
+  markdown assistant cards, user bubbles (with optional image preview), live streaming
+  card for model deltas, thinking bubble, action cards, quiet gray tool-result rows
+  (with screenshot preview), error cards, floating capsule (model selector, mic,
+  send/stop), sidebar-collapsed controls.
 - `SettingsDialog` — Appearance (theme, controls place/position/shape/size, show
-  reasoning), Providers (keys, base URL, autodetect, OAuth), Archived sessions.
+  reasoning), Providers (keys, base URL, autodetect, OAuth), Archived sessions, plus a
+  safety block: confirmation prompt toggle and an explicit `shell_exec` opt-in.
 - `ActionStepCard` — Running / Success / Failed badge, collapsible args + result, image
   preview for screenshots.
 - `ThemeManager` — Dark / Light / System with live repaint.
@@ -213,17 +250,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```bash
 ./scripts/build.sh
 ./scripts/run.sh
-./scripts/smoke-test.sh        # JSON-lines protocol under Xvfb in CI
+./scripts/smoke-test.sh        # JSON-lines protocol + fs/shell sandbox under Xvfb
 ./scripts/package-linux.sh
 ```
 Requires Qt6 Widgets/Svg/Network (+ optional Multimedia), X11 Xtst/Xfixes, libpng.
+`SecretStore` uses libsecret when present at runtime (dlopen'd, not a build dep) and
+falls back to an obfuscated file otherwise.
 
 ### CI
-`.github/workflows/manual-build.yml` (`workflow_dispatch` only, default ref `main`):
-- Linux: apt deps → CMake/Ninja → build → `xvfb-run ./scripts/smoke-test.sh` → artifact.
-- Windows: MSYS2 UCRT64 → CMake/Ninja → build → `--describe` schema validation →
-  artifact. Validation expects the 10 computer-control tool names above.
-- Both jobs upload 14-day artifacts; there is no automatic tag/release pipeline.
+`.github/workflows/manual-build.yml` (`workflow_dispatch`, any ref via the `ref` input):
+- Linux: apt deps → CMake/Ninja → build → `xvfb-run ./scripts/smoke-test.sh` →
+  `--describe` schema validation asserting all **17** tool names → artifact.
+- Windows: MSYS2 UCRT64 → CMake/Ninja → build → `--describe` schema validation
+  (expects the same 17 tool names) → artifact.
+- Both jobs upload 14-day artifacts.
+
+`.github/workflows/release.yml` (push tags `v*`): builds both platforms via the
+existing `package-linux.sh` / `package-windows.ps1`, re-validates tool schemas +
+smoke test, then attaches `dist/*.tar.gz` and `dist/*.zip` to a GitHub Release
+(`softprops/action-gh-release@v2`).
 
 ---
 
@@ -232,64 +277,55 @@ Requires Qt6 Widgets/Svg/Network (+ optional Multimedia), X11 Xtst/Xfixes, libpn
 - Codex-style Qt UI, frameless window, custom chrome, dark/light/system themes.
 - 7 providers, per-provider keys/models/base URLs, model autodetect.
 - Session lifecycle with archive/restore/2-step delete and search.
-- Streaming-free chat with markdown rendering, thinking/reasoning cards, error retry.
+- Streamed chat with markdown rendering, thinking/reasoning cards, error retry.
 - Agent loop with sequential tool calls, per-call action cards, Allow/Deny prompt.
 - Multimodal feedback: screenshots fed back as vision input.
 - Voice input with Whisper transcription.
 - Windows + Linux engine, JSON-lines protocol, `--describe`, idle timeout, Esc abort.
 - Build/package scripts, manual CI on both platforms.
 - OAuth hardening and request timeouts (PR #2, merged as `f216ae2`).
+- **Context compaction** (`ConversationCompactor`): 48 k token budget, newest-tail
+  windowing (28 k), dropped-image trimming, consecutive-message merge, and a short
+  summary message for the omitted prefix; operates on a copy only.
+- **Real cancellation + streaming**: `AiClient` is a QObject with `abort()` and SSE
+  streaming for Gemini/OpenAI-compatible/Anthropic; `Stop` invalidates the run
+  (`m_runId`), aborts the reply, and ends the engine session.
+- **Secure secret storage** (`SecretStore`): DPAPI on Windows, libsecret (dlopen) on
+  Linux, obfuscated chmod-600 file fallback; legacy plaintext keys migrate and are
+  scrubbed.
+- **Safe-by-default permissions**: `requireConfirmation` now defaults to `true`.
+- **Filesystem + shell tools** on both engines (`fs_list/read/write/mkdir/delete/search`,
+  `shell_exec`), sandboxed to `$HOME` + temp + `--allow-root`, argv-only shell, output
+  caps, timeout; `shell_exec` hidden until enabled in Settings.
+- **Persisted tool results & attachments**: role `tool` messages with `imagePath`,
+  attachments copied under app data, previews restored after restart.
+- **Auto-titled sessions** from the first real user message.
+- **Tag-driven release pipeline** (`.github/workflows/release.yml`).
 
 ---
 
 ## 11. What is left to build
 
-Ordered by impact. Each item names the place to start.
+Ordered by impact. Each item names the place to start. (2026-10 status: former items
+1–4 of P0, 5–8 and 10 of P1, and 12 of P2 are **done** — see §10.)
 
 ### P0 — correctness / safety
 
-1. **Context management.** `m_history` grows forever; nothing truncates or summarizes.
-   Long sessions will exceed provider context limits and fail. Add token estimation,
-   windowing (keep system + recent turns), optional summarization, and a visible token
-   budget. Start in `ChatArea::runAgentLoop` / a new `ConversationCompactor`.
-2. **Real cancellation.** The Stop button only calls `endSession()` and flips `m_busy`;
-   the in-flight `QNetworkReply` is never aborted, so late callbacks can still mutate UI
-   and history. Keep the active reply in `AiClient`, add `abort()`, and guard callbacks
-   with a run/generation id.
-3. **Secure secret storage.** API keys live in plaintext (`provider_keys.json` and
-   QSettings). Use Windows DPAPI (`CryptProtectData`), Linux libsecret/keyring, or an
-   encrypted store; migrate existing keys.
-4. **Safe-by-default permissions.** `requireConfirmation` defaults to `false`, so OS
-   actions run without asking. Default it on (or require first-run consent), and consider
-   a per-tool allowlist.
+*(none open — context compaction, real cancellation, secret storage, and
+confirm-by-default are all implemented)*
 
 ### P1 — capability
 
-5. **Response streaming.** `AiClient` waits for the full body; the UI only shows a
-   generic thinking bubble. Add SSE/streaming for OpenAI-compatible, Gemini
-   (`streamGenerateContent`), and Anthropic, with incremental markdown rendering.
-6. **Filesystem / shell / remote tools.** `main` has none. The remote
-   `feature/agent-tools` branch and the old CI check (`fs_list`, `fs_read`, `fs_write`,
-   `fs_mkdir`, `fs_delete`) indicate planned filesystem tools. See §12 for the full
-   planned tool surface; every one of them needs a sandbox, limits, and confirmation.
-7. **Persist attachments.** `ChatMessageItem` drops `imagePath`, so screenshots vanish
-   from history after restart. Store the path (and copy into app data) and restore the
-   preview.
-8. **Auto-title sessions.** New chats stay "New Chat"; derive a title from the first user
-   message (local heuristic or a cheap model call) via `SessionManager::renameSession`.
 9. **Parallel tool calls.** Independent calls run sequentially. Batch non-conflicting
    calls and keep ordering for input-dependent ones.
-10. **Retry/backoff.** Add exponential backoff for 429/5xx and per-request timeouts
-    everywhere (model list/transcription already have 120 s).
+10. *(done — retry/backoff with SSE-guard is in `AiClient::postWithRetry`.)*
 
 ### P2 — polish / reach
 
 11. **Tests.** Only the shell smoke test exists. Add unit tests for provider payload
     builders/parsers, `AntigravityAuth::parseTokenResponse`, session persistence, and the
     JSON-lines reader; add a Qt integration test for the agent loop with a fake provider.
-12. **Release pipeline.** `dist/` is gitignored and there are no GitHub Releases, so
-    packaged builds are local-only. Add a tag workflow that builds both platforms and
-    attaches the zips to a release.
+12. *(done — `.github/workflows/release.yml` packages both platforms on `v*` tags.)*
 13. **Streaming token/usage display.** No token or cost accounting is shown to the user.
 14. **Native Wayland.** Capture currently shells out to `grim`/`import`; prefer the
     xdg-desktop-portal Screenshot API.
@@ -297,38 +333,44 @@ Ordered by impact. Each item names the place to start.
     images and file references for the model.
 16. **macOS.** Not supported; would need a Cocoa/Quartz engine implementation.
 17. **Accessibility / i18n.** Keyboard navigation and translations are not implemented.
-18. **Refactor `ChatArea.cpp`.** ~940 lines mixing UI construction, the agent loop,
+18. **Refactor `ChatArea.cpp`.** ~1100 lines mixing UI construction, the agent loop,
     rendering, and input handling. Extract `MessageListView`, `ThinkingBubble`,
     `InputCapsule`, and `AgentRunner`.
 
 ### Known rough edges
 
 - Tool results are injected as `role: "user"` text (`"Tool result for ..."`), not native
-  tool-result messages. Works, but providers cannot distinguish tool output from user
-  speech.
-- The Stop path can leave a tool session and a network request in inconsistent states.
-- `SettingsManager` stores keys in QSettings while `ProviderKeyManager` stores them in
-  JSON; the migration is one-way and duplicates can drift.
-- `--describe` is cached per `CoworkTool` instance; rebuilding the engine while the app
-  runs requires a restart.
+  provider tool-result messages. Works, but providers cannot distinguish tool output
+  from user speech.
+- `shell_exec` on Linux resolves inside the sandbox roots but a hardcoded absolute path
+  (e.g. `/usr/bin/env`) is allowed to bypass the cwd jail by design; `-p` argv style is
+  not validated beyond the array requirement.
+- The engine's `--describe` is cached per `CoworkTool` instance; rebuilding the engine
+  while the app runs requires a restart (toggling the shell setting also wants a fresh
+  engine start to take effect).
+- Remote/git/MCP engine tools (§12) remain spec-only; secret routing for them is ready
+  (`SecretStore`) but no engine plumbing exists yet.
+- CI validates the Windows engine's compile + schemas, but no Windows smoke run against
+  real fs/shell ops yet (`smoke-test.ps1` only sends safe happy-path commands).
 
 ---
 
 ## 12. Planned tools (not implemented yet)
 
-The engine currently exposes **only the 10 GUI tools** from §5. The tools below are the
-intended expansion of `matricX-cowork --describe`; none exist on `main` today. Add them to
-the engine dispatch, the `--describe` schemas, and the CI validation list together.
+The engine now exposes **the 10 GUI tools plus the 6 filesystem tools and `shell_exec`**
+(§5) — those lists are live and CI-validated. Everything below remains spec-only; when
+adding one, update the engine dispatch, the `--describe` schema, and the CI validation
+list **together** (engine version bump included).
 
 | Tool id | Capability | Risk | Required guardrails |
 |---|---|---|---|
-| `fs_list` | List a directory (name, size, mtime, type) | low | allowed roots, depth limit |
-| `fs_read` | Read a UTF-8/binary file | medium | allowed roots, max bytes, redact secrets |
-| `fs_write` | Create/overwrite a file | high | allowed roots, backup/atomic write, confirmation |
-| `fs_mkdir` | Create a directory | low | allowed roots |
-| `fs_delete` | Delete file/dir | high | allowed roots, no recursive by default, confirmation |
-| `fs_search` | Glob/regex search across files | medium | allowed roots, result cap, ignore list |
-| `shell_exec` | Run a command, return stdout/stderr/exit code | **critical** | explicit opt-in, argv (no shell string), cwd allowlist, timeout, output cap, confirmation |
+| ~~`fs_list`~~ | **implemented** | low | allowed roots, result cap (done) |
+| ~~`fs_read`~~ | **implemented** | medium | allowed roots, 1 MiB cap (done) |
+| ~~`fs_write`~~ | **implemented** | high | allowed roots, 2 MiB cap (done) |
+| ~~`fs_mkdir`~~ | **implemented** | low | allowed roots (done) |
+| ~~`fs_delete`~~ | **implemented** | high | allowed roots, explicit `recursive` flag (done) |
+| ~~`fs_search`~~ | **implemented** | medium | allowed roots, result cap (done) |
+| ~~`shell_exec`~~ | **implemented** (both engines) | **critical** | `--enable-shell` opt-in in Settings, argv-only, `$HOME`/temp/`--allow-root` sandbox, 256 KiB output cap, 300 s timeout (done) |
 | `powershell` | Run a PowerShell script/command (Windows) | **critical** | opt-in, `-NoProfile -NonInteractive`, timeout, transcript log |
 | `bash` | Run a bash script/command (Linux) | **critical** | opt-in, timeout, no login shell, output cap |
 | `ssh_exec` | Run a command on a remote host over SSH | **critical** | host allowlist, key/agent auth, timeout, audit log |

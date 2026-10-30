@@ -2,6 +2,8 @@
 
 #include <QSettings>
 
+#include "core/SecretStore.h"
+
 namespace mcw {
 
 SettingsManager::SettingsManager() = default;
@@ -90,16 +92,41 @@ void SettingsManager::setProvider(const QString &provider) {
     s.setValue("ai/provider", provider);
 }
 
+static QString secretKeyFor(const QString &pid) {
+    return QString("providerKey/%1").arg(pid);
+}
+
 QString SettingsManager::apiKey(const QString &providerId) const {
     const QString pid = providerId.isEmpty() ? provider() : providerId;
+
+    // Preferred: OS-protected store.
+    const QString secret = SecretStore::instance().load(secretKeyFor(pid));
+    if (!secret.isEmpty()) return secret;
+
+    // One-time migration of legacy plaintext keys: move into the secret store
+    // and scrub the QSettings copy.
     QSettings s("MCowork", "MCowork");
-    return s.value(QString("ai/%1/apiKey").arg(pid), QString()).toString();
+    const QString legacyKey = QString("ai/%1/apiKey").arg(pid);
+    const QString legacy = s.value(legacyKey, QString()).toString();
+    if (!legacy.isEmpty()) {
+        SecretStore::instance().store(secretKeyFor(pid), legacy);
+        s.remove(legacyKey);
+    }
+    return legacy;
 }
 
 void SettingsManager::setApiKey(const QString &key, const QString &providerId) {
     const QString pid = providerId.isEmpty() ? provider() : providerId;
     QSettings s("MCowork", "MCowork");
-    s.setValue(QString("ai/%1/apiKey").arg(pid), key);
+    const QString legacyKey = QString("ai/%1/apiKey").arg(pid);
+    if (key.isEmpty()) {
+        s.remove(legacyKey);
+        SecretStore::instance().remove(secretKeyFor(pid));
+        return;
+    }
+    SecretStore::instance().store(secretKeyFor(pid), key);
+    // Never keep a plaintext copy around.
+    if (s.contains(legacyKey)) s.remove(legacyKey);
 }
 
 QString SettingsManager::model(const QString &providerId) const {
@@ -141,12 +168,22 @@ QString SettingsManager::activeBaseUrl() const {
 
 bool SettingsManager::requireConfirmation() const {
     QSettings s("MCowork", "MCowork");
-    return s.value("safety/requireConfirmation", false).toBool();
+    return s.value("safety/requireConfirmation", true).toBool();
 }
 
 void SettingsManager::setRequireConfirmation(bool req) {
     QSettings s("MCowork", "MCowork");
     s.setValue("safety/requireConfirmation", req);
+}
+
+bool SettingsManager::allowShell() const {
+    QSettings s("MCowork", "MCowork");
+    return s.value("safety/allowShell", false).toBool();
+}
+
+void SettingsManager::setAllowShell(bool allow) {
+    QSettings s("MCowork", "MCowork");
+    s.setValue("safety/allowShell", allow);
 }
 
 QString SettingsManager::windowControlsPlace() const {

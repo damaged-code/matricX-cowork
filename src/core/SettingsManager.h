@@ -24,6 +24,8 @@ public:
     QString provider() const;
     void setProvider(const QString &provider);
 
+    // API keys live in the SecretStore (OS keyring / DPAPI), never in plain
+    // QSettings. Legacy plaintext values migrate on first read.
     QString apiKey(const QString &providerId = QString()) const;
     void setApiKey(const QString &key, const QString &providerId = QString());
 
@@ -36,8 +38,13 @@ public:
 
     QString activeBaseUrl() const;
 
-    bool requireConfirmation() const;
+    bool requireConfirmation() const;   // default: true
     void setRequireConfirmation(bool req);
+
+    // Gate for the engine's shell_exec tool. Off by default; when enabled the
+    // engine is launched with --enable-shell and the AI is offered the tool.
+    bool allowShell() const;
+    void setAllowShell(bool allow);
 
     // Title-bar chrome configuration
     QString windowControlsPlace() const;     // "titlebar" | "sidebar"
